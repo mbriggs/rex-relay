@@ -30,7 +30,8 @@ pub struct Config {
     /// How long one call to the server may take before the connection counts as stalled,
     /// such as `10s`. `send` and `wait` then reconnect.
     pub call_timeout: Option<String>,
-    /// How long a command keeps retrying its first connection, such as `60s`. `0s` tries once.
+    /// How long a command keeps trying to connect, such as `60s`: its first connection, and a
+    /// connection that `send`, `wait`, or `run` lost. `0s` tries once.
     pub connect_timeout: Option<String>,
     /// Where the audit log goes. Defaults to `$XDG_STATE_HOME/rex-relay/audit.jsonl`.
     pub audit_log: Option<PathBuf>,

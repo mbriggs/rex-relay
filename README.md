@@ -225,10 +225,15 @@ After `connect_timeout` (default 60 seconds) it gives up with exit code 16. A se
 but refuses the client, such as for an unsupported API revision, isn't retried.
 
 `send` and `wait` re-read the pane's status every 3 seconds, whether or not events arrive. That
-read catches a missed event. Its round trip also shows whether the connection still works.
+read catches a missed event. Its round trip is also the heartbeat. A connection that goes quiet
+without closing, as when a network path dies with no FIN or RST, fails it within about 13
+seconds: the 3-second poll plus `call_timeout`. `run` checks the shell every quarter second the
+same way. `rexctl` doesn't send WebSocket pings, because the status read already tests the
+whole path to the server, not only its WebSocket layer.
 
 If any call to the server fails or takes longer than `call_timeout` (default 10 seconds),
-`rexctl` drops the connection and opens a new one. It continues the same client on the server
+`rexctl` drops the connection and opens a new one. Looking up the server's name counts as a
+call too, so an unreachable DNS server can't stall a reconnect. It continues the same client on the server
 (the welcome's reconnect token), joins the session again, re-reads the pane's status, and keeps
 waiting. A Done reported while the connection was down still ends the wait. Failed attempts
 repeat after 1, 2, 4, and then every 8 seconds.
@@ -236,8 +241,9 @@ repeat after 1, 2, 4, and then every 8 seconds.
 `rexctl` never types anything after a reconnect. The message went out once, before the wait
 began.
 
-If the connection is still down when `--timeout` runs out, `rexctl` exits 16. In that case
-Claude Code's state is unknown. Check it with `rexctl status` once the server is reachable.
+If the connection doesn't come back within `connect_timeout` (default 60 seconds), or before
+`--timeout` runs out, `rexctl` exits 16. In that case Claude Code's state is unknown. Check it
+with `rexctl status` once the server is reachable.
 
 ### Running shell commands
 
@@ -308,7 +314,7 @@ and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 | 13 | Needs sign-in: waiting for a login or credential. |
 | 14 | Error: the program reported an error. |
 | 15 | Timeout: still working when `--timeout` ran out. |
-| 16 | Lost connection: the first connection failed for `connect_timeout`, or the connection broke during `send` or `wait` and couldn't be restored before `--timeout`. In the second case, Claude Code's state is unknown. |
+| 16 | Lost connection: the first connection failed for `connect_timeout`, or the connection broke during `send`, `wait`, or `run` and didn't come back within `connect_timeout`. In the second case, Claude Code's state is unknown. |
 
 ## Guard rails
 

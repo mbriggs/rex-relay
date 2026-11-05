@@ -64,7 +64,7 @@ to answer it in Rex. Until then, `send` refuses with exit 3.
 | 13 | Needs sign-in. | Same as 10. |
 | 14 | Claude Code reported an error. | `rexctl read` the pane and report it. |
 | 15 | Timeout: still working. | `rexctl wait <target>` to keep waiting. |
-| 16 | Lost connection: the Rex server is unreachable. | Once it's back, `rexctl status`, then `wait`. |
+| 16 | Lost connection: the Rex server stayed unreachable for about a minute. | Once it's back, `rexctl status`, then `wait`. |
 
 After exit 15, the message was typed once. Keep following the task with `wait`, because sending
 it again starts it twice. Exit 16 can come before or after the message went out. Once the server

@@ -2,10 +2,10 @@
 //! Tailscale Serve), or a Unix socket. rexrs's tungstenite transport runs the WebSocket over it.
 
 use std::io::{self, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -87,11 +87,34 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
     Arc::new(config)
 }
 
+/// Looks up `host`, giving up after `timeout`. The system resolver has no timeout of its own,
+/// and with the DNS server unreachable, as when a tailnet's MagicDNS is cut off, it can block
+/// for a long time. The lookup runs on its own thread, which is left to finish on its own.
+fn resolve(host: &str, port: u16, timeout: Duration) -> Result<Vec<SocketAddr>> {
+    let (tx, rx) = mpsc::channel();
+    let name = host.to_owned();
+    std::thread::spawn(move || {
+        let _ = tx.send(
+            (name.as_str(), port)
+                .to_socket_addrs()
+                .map(Iterator::collect),
+        );
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(found) => found.with_context(|| format!("resolving {host}")),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "resolving {host} took longer than {}s",
+                timeout.as_secs_f32()
+            ),
+        )
+        .into()),
+    }
+}
+
 fn connect_tcp(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
-    let addrs: Vec<_> = (host, port)
-        .to_socket_addrs()
-        .with_context(|| format!("resolving {host}"))?
-        .collect();
+    let addrs = resolve(host, port, timeout)?;
     let mut last = None;
     for addr in addrs {
         match TcpStream::connect_timeout(&addr, timeout) {
@@ -144,6 +167,14 @@ pub fn connect(endpoint: &Endpoint, path: &str, timeout: Duration) -> Result<Tra
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn resolves_with_a_timeout() {
+        let addrs = resolve("127.0.0.1", 80, Duration::from_secs(5)).unwrap();
+        assert_eq!(addrs, [SocketAddr::from(([127, 0, 0, 1], 80))]);
+        let error = resolve("nonexistent.invalid", 80, Duration::from_secs(10)).unwrap_err();
+        assert!(crate::rex::is_connection_error(&error), "{error:#}");
+    }
 
     #[test]
     fn builds_a_tls_config_with_roots() {

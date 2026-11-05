@@ -918,8 +918,13 @@ impl ShellWatch {
                 return Ok(Outcome::TimedOut { status });
             }
             let Some(rex) = link.rex.as_mut() else {
+                if link.gave_up(now) {
+                    return Ok(Outcome::LostConnection {
+                        status: Status::Working,
+                    });
+                }
                 if now < link.retry_at {
-                    std::thread::sleep(link.retry_at.min(deadline) - now);
+                    link.pause(now, deadline);
                     continue;
                 }
                 let attempt = Rex::connect(link.endpoint, link.call_timeout, link.token.as_deref())
@@ -1104,7 +1109,7 @@ fn finish(out: &Out, outcome: Outcome) -> i32 {
                 }));
             } else {
                 out.note(&format!(
-                    "lost the connection to the server and couldn't reconnect before the timeout (last status: {})",
+                    "lost the connection to the server and couldn't reconnect (last status: {})",
                     status.label()
                 ));
             }
@@ -1117,9 +1122,13 @@ fn finish(out: &Out, outcome: Outcome) -> i32 {
 struct Link<'a> {
     endpoint: &'a Endpoint,
     call_timeout: Duration,
+    /// How long a lost connection may take to come back before the watch gives up.
+    patience: Duration,
     rex: Option<Rex>,
     /// Continues the same client on the server after a reconnect.
     token: Option<String>,
+    /// When the connection was lost, while it is down.
+    lost_at: Option<Instant>,
     /// Failed reconnect attempts since the connection was lost.
     failures: u32,
     /// When to try to reconnect next.
@@ -1131,8 +1140,10 @@ impl<'a> Link<'a> {
         Link {
             endpoint: &ctx.endpoint,
             call_timeout: ctx.config.call_timeout(),
+            patience: ctx.config.connect_timeout(),
             token: rex.reconnect_token(),
             rex: Some(rex),
+            lost_at: None,
             failures: 0,
             retry_at: Instant::now(),
         }
@@ -1141,9 +1152,26 @@ impl<'a> Link<'a> {
     /// Drops a connection that stalled or broke. There's no close handshake, because it would
     /// wait on the server. The first reconnect attempt is immediate.
     fn lose(&mut self) {
+        let now = Instant::now();
         self.rex = None;
+        self.lost_at = Some(now);
         self.failures = 0;
-        self.retry_at = Instant::now();
+        self.retry_at = now;
+    }
+
+    /// The connection has been down for longer than `patience`.
+    fn gave_up(&self, now: Instant) -> bool {
+        self.lost_at.is_some_and(|lost| now >= lost + self.patience)
+    }
+
+    /// Waits for the next reconnect attempt, but no later than `deadline` or the end of
+    /// `patience`.
+    fn pause(&self, now: Instant, deadline: Instant) {
+        let mut until = self.retry_at.min(deadline);
+        if let Some(lost) = self.lost_at {
+            until = until.min(lost + self.patience);
+        }
+        std::thread::sleep(until.saturating_duration_since(now));
     }
 
     fn failed(&mut self) {
@@ -1156,6 +1184,7 @@ impl<'a> Link<'a> {
             self.token = Some(token);
         }
         self.rex = Some(rex);
+        self.lost_at = None;
         self.failures = 0;
     }
 
@@ -1299,8 +1328,13 @@ impl Watch {
                 return Ok(Outcome::TimedOut { status });
             }
             let Some(rex) = link.rex.as_mut() else {
+                if link.gave_up(now) {
+                    return Ok(Outcome::LostConnection {
+                        status: self.tracker.current(),
+                    });
+                }
                 if now < link.retry_at {
-                    std::thread::sleep(link.retry_at.min(clock.deadline) - now);
+                    link.pause(now, clock.deadline);
                     continue;
                 }
                 finished = self.resume(link, out, &mut shown)?;

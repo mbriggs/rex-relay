@@ -43,6 +43,9 @@ enum AfterEnter {
     DropForever,
     /// Clears its records for a moment, as Claude Code does mid-turn, then keeps working.
     BlipThenKeepWorking,
+    /// The path to the server dies silently: this connection stops answering without closing,
+    /// and every later connection is accepted and then ignored.
+    PathDies,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +68,8 @@ struct State {
     hellos: Vec<Value>,
     /// How many upcoming connections to drop before the WebSocket handshake.
     refuse: usize,
+    /// Accept new connections and never answer them.
+    ignore_new: bool,
     /// A record to report as an event once a reconnected client reads the status.
     after_reconnect: Option<(String, String, Value)>,
     /// Unsent text in the prompt box (the line equal to `BOX[1]`).
@@ -145,6 +150,7 @@ impl Mock {
             methods: vec![],
             hellos: vec![],
             refuse: 0,
+            ignore_new: false,
             after_reconnect: None,
             input: String::new(),
             sticky_input: false,
@@ -400,6 +406,12 @@ fn set_records(state: &Mutex<State>, session: &str, block: &str, record: Value) 
 }
 
 fn serve(stream: std::net::TcpStream, state: Arc<Mutex<State>>) {
+    if state.lock().unwrap().ignore_new {
+        // Hold the socket open and never answer, not even the WebSocket handshake.
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        drop(stream);
+        return;
+    }
     {
         let mut s = state.lock().unwrap();
         if s.refuse > 0 {
@@ -484,6 +496,11 @@ fn serve(stream: std::net::TcpStream, state: Arc<Mutex<State>>) {
                     }
                     AfterEnter::DropForever => {
                         state.lock().unwrap().refuse = usize::MAX;
+                        return;
+                    }
+                    AfterEnter::PathDies => {
+                        state.lock().unwrap().ignore_new = true;
+                        std::thread::sleep(std::time::Duration::from_secs(120));
                         return;
                     }
                     AfterEnter::BlipThenKeepWorking => {
@@ -737,6 +754,31 @@ fn send_catches_done_by_polling_when_events_stop() {
     assert_eq!(events.last().unwrap()["status"], "done");
     assert!(connection_states(&events).is_empty(), "{events:?}");
     assert_eq!(mock.writes().len(), 2);
+}
+
+#[test]
+fn a_silently_dead_path_exits_16_within_connect_timeout() {
+    // The live failure: the tailnet path died without a FIN or RST. The open connection went
+    // quiet, and new connections never answered. send has to notice, retry for
+    // connect_timeout, and give up with 16, long before --timeout.
+    let mock = demo(vec![], AfterEnter::PathDies);
+    mock.write_config_with(
+        &[&mock.endpoint()],
+        "call_timeout = \"1s\"\nconnect_timeout = \"3s\"\n",
+    );
+    let started = std::time::Instant::now();
+    let (output, events) = send_json(&mock, "60s");
+    let took = started.elapsed();
+    assert_eq!(code(&output), 16, "{output:?}");
+    assert!(
+        took < std::time::Duration::from_secs(20),
+        "took {took:?}: {output:?}"
+    );
+    let last = events.last().unwrap();
+    assert_eq!(last["status"], "lost_connection");
+    assert_eq!(connection_states(&events)[0], "lost");
+    assert_eq!(mock.writes().len(), 2, "the message was typed once");
+    assert_eq!(mock.audit().last().unwrap()["result"], "lost_connection");
 }
 
 #[test]

@@ -14,7 +14,7 @@ The first release, under the MIT License.
 - Exit codes for each way Claude Code can stop: done, needs approval, question, needs input,
   needs sign-in, error, and timeout. Exit code 16 means the server couldn't be reached: the first
   connection failed for `connect_timeout` (default 60 seconds), or the connection broke during
-  `send` or `wait` and couldn't be restored before `--timeout`.
+  `send`, `wait`, or `run` and didn't come back within `connect_timeout`.
 - Retries for every command's first connection, with the same backoff as reconnects. Each failed
   attempt is noted on stderr.
 - Reconnects during `send` and `wait`. A call that fails or takes longer than `call_timeout`
