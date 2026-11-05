@@ -150,6 +150,20 @@ pub fn check_ready(reading: &Reading, paste: Option<bool>, claude: bool) -> Resu
     }
 }
 
+/// Everything `send` checks about the pane before it types, except leftover input: the
+/// program's status, then the screen. `new --wait-ready` uses it too, so it can't call a pane
+/// ready that `send` would refuse.
+pub fn check_sendable(
+    status: Status,
+    reading: &Reading,
+    paste: Option<bool>,
+    claude: bool,
+    answer: bool,
+) -> Result<(), Refusal> {
+    check_status_for_send(status, answer)?;
+    check_ready(reading, paste, claude)
+}
+
 /// Unsent text in Claude Code's input box would join the message. Only its length is reported,
 /// because the refusal goes to the audit log.
 pub fn leftover_input(input: &str) -> Refusal {
