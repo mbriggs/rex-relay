@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::guard::Refusal;
 use crate::ids::BlockId;
-use crate::status::{Records, TERMINAL_CREATOR};
+use crate::status::{Records, Status, TERMINAL_CREATOR};
 
 /// A terminal block in a session's view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -194,9 +194,17 @@ pub struct Evidence {
     pub records: Records,
     pub process: Option<ProcessResponse>,
     pub title: Option<String>,
+    /// Background shells Claude Code's footer says are still running.
+    pub shells: usize,
 }
 
 impl Evidence {
+    /// The pane's status, or nothing when it has no status records and no background shells.
+    pub fn status(&self) -> Option<Status> {
+        (!self.records.is_empty() || self.shells > 0)
+            .then(|| self.records.status().with_shells(self.shells))
+    }
+
     /// Why this pane looks like Claude Code, if it does.
     pub fn claude_reason(&self) -> Option<&'static str> {
         if self.records.apps().any(names_claude) {

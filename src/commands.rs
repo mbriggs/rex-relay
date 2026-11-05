@@ -210,7 +210,27 @@ fn gather(rex: &mut Rex, sid: &SessionId, pane: &Pane) -> Evidence {
             .unwrap_or_default(),
         process: rex.process(sid, &pane.block_id).ok(),
         title: rex.title(sid, &pane.block_id).ok(),
+        shells: shell_count(rex, sid, &pane.block_id).unwrap_or_default(),
     }
+}
+
+/// The background shells Claude Code's footer shows. They only appear on screen: no status
+/// record or event reports them.
+fn shell_count(rex: &mut Rex, sid: &SessionId, bid: &BlockId) -> Result<usize> {
+    Ok(prompt::read(&rex.screen_vt(sid, bid)?).shells)
+}
+
+/// A status in words: `Background (2 shells)`, or the label, then the message if there is one.
+fn describe(status: Status, shells: usize, msg: Option<&str>) -> String {
+    let mut text = status.label().to_owned();
+    if status == Status::Background {
+        let s = if shells == 1 { "" } else { "s" };
+        text.push_str(&format!(" ({shells} shell{s})"));
+    }
+    if let Some(msg) = msg {
+        text.push_str(&format!(": {msg}"));
+    }
+    text
 }
 
 /// Finds the target pane in a resolved session: the panes `scope` names, narrowed by `block`,
@@ -319,10 +339,11 @@ fn tree(ctx: &Ctx, out: &Out, only: Option<&str>) -> Result<i32> {
 }
 
 /// A pane's status for listings: its label, Claude Code's permission mode, and the message.
-/// Nothing for a pane with neither status records nor a mode.
+/// Nothing for a pane with neither a status nor a mode.
 fn pane_status(evidence: &Evidence, mode: Option<Mode>) -> Option<String> {
-    let mut text =
-        (!evidence.records.is_empty()).then(|| evidence.records.status().label().to_owned());
+    let mut text = evidence
+        .status()
+        .map(|status| describe(status, evidence.shells, None));
     if let Some(mode) = mode {
         let mode = format!("[{}]", mode.as_str());
         text = Some(match text {
@@ -393,7 +414,6 @@ fn tree_json(
                 "panes": [],
             }));
         }
-        let status = (!evidence.records.is_empty()).then(|| evidence.records.status());
         tabs[pane.tab - 1]["panes"]
             .as_array_mut()
             .expect("panes is an array")
@@ -404,7 +424,8 @@ fn tree_json(
                 "focused": pane.focused,
                 "program": evidence.program(),
                 "claude": evidence.claude_reason().is_some(),
-                "status": status,
+                "status": evidence.status(),
+                "shells": evidence.shells,
                 "mode": mode,
                 "msg": evidence.records.msg(),
             }));
@@ -464,12 +485,14 @@ fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
     let mut status = located.evidence.records.status();
     let reading = prompt::read(&rex.screen_vt(sid, bid)?);
     rex.close();
+    let evidence = &located.evidence;
     let dialog = reading.startup_dialog(status);
     let summary = dialog.map(prompt::Dialog::summary);
     if dialog.is_some() {
         status = Status::Dialog;
     }
-    let msg = summary.as_deref().or(located.evidence.records.msg());
+    let status = status.with_shells(evidence.shells);
+    let msg = summary.as_deref().or(evidence.records.msg());
     if out.json {
         out.event(json!({
             "type": "status",
@@ -478,12 +501,13 @@ fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
             "block_id": located.pane.block_id,
             "status": status,
             "label": status.label(),
+            "shells": evidence.shells,
             "msg": msg,
             "dialog": dialog.map(|d| &d.text),
             "folder": dialog.and_then(|d| d.folder.as_deref()),
             "mode": reading.mode,
-            "program": located.evidence.program(),
-            "claude": located.evidence.claude_reason(),
+            "program": evidence.program(),
+            "claude": evidence.claude_reason(),
         }));
     } else {
         let mut line = format!(
@@ -491,7 +515,7 @@ fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
             located.session.label,
             located.session.id,
             located.pane.block_id,
-            status.label(),
+            describe(status, evidence.shells, None),
             reading.mode.as_str()
         );
         if let Some(msg) = msg {
@@ -864,7 +888,7 @@ impl<'a> Attempt<'a> {
         let paste = rex.bracketed_paste(&sid, &bid).ok().flatten();
         let claude = located.evidence.claude_reason().is_some();
         guard::check_sendable(initial, &reading, paste, claude, args.answer)?;
-        if let Some(input) = reading.input {
+        if let Some(input) = reading.input.clone() {
             if !args.clear_input {
                 return Err(guard::leftover_input(&input).into());
             }
@@ -899,6 +923,7 @@ impl<'a> Attempt<'a> {
             sid,
             bid,
             records,
+            shells: reading.shells,
             seq,
             tracker: Tracker::after_send(initial),
             pump,
@@ -1133,12 +1158,14 @@ fn wait(ctx: &Ctx, out: &Out, args: &WaitArgs) -> Result<i32> {
             },
         ));
     }
-    let tracker = Tracker::waiting(records.status());
+    let shells = shell_count(&mut rex, &sid, &bid)?;
+    let tracker = Tracker::waiting(records.status().with_shells(shells));
     let pump = Output::new(&args.wait, DEFAULT_HOLDBACK, || rex.read_text(&sid, &bid))?;
     let watch = Watch {
         sid,
         bid,
         records,
+        shells,
         seq,
         tracker,
         pump,
@@ -1345,6 +1372,8 @@ struct Watch {
     sid: SessionId,
     bid: BlockId,
     records: Records,
+    /// Background shells the pane's footer showed when last read.
+    shells: usize,
     /// Events up to this seq are already reflected in `records`.
     seq: u64,
     tracker: Tracker,
@@ -1455,7 +1484,7 @@ impl Watch {
                 continue;
             };
             match self.step(rex, &mut clock, out, &mut shown) {
-                Ok(done) => finished = done.or_else(|| self.tracker.settled_by(Instant::now())),
+                Ok(done) => finished = done,
                 Err(error) if rex::is_connection_error(&error) => {
                     connection_note(out, "lost", &format!("{error:#}"));
                     link.lose();
@@ -1470,9 +1499,30 @@ impl Watch {
         })
     }
 
-    /// One turn on a live connection: read the text or the status if due, else wait for an
-    /// event.
+    /// One turn on a live connection. A turn that seems over is checked against the footer
+    /// first, since background shells only show there.
     fn step(
+        &mut self,
+        rex: &mut Rex,
+        clock: &mut Clock,
+        out: &Out,
+        shown: &mut Status,
+    ) -> Result<Option<Status>> {
+        let done = self
+            .poll(rex, clock, out, shown)?
+            .or_else(|| self.tracker.settled_by(Instant::now()));
+        if matches!(done, Some(Status::Done | Status::Idle)) {
+            let shells = shell_count(rex, &self.sid, &self.bid)?;
+            if shells > 0 {
+                self.shells = shells;
+                return Ok(self.changed(out, shown));
+            }
+        }
+        Ok(done)
+    }
+
+    /// Reads the text or the status if due, else waits for an event.
+    fn poll(
         &mut self,
         rex: &mut Rex,
         clock: &mut Clock,
@@ -1487,10 +1537,12 @@ impl Watch {
         }
         if now >= clock.next_status {
             let (seq, fresh) = rex.program_status(&self.sid, &self.bid)?;
+            let shells = shell_count(rex, &self.sid, &self.bid)?;
             clock.next_status = now + STATUS_POLL;
             self.seq = self.seq.max(seq);
-            if fresh != self.records {
+            if fresh != self.records || shells != self.shells {
                 self.records = fresh;
+                self.shells = shells;
                 return Ok(self.changed(out, shown));
             }
             return Ok(None);
@@ -1515,23 +1567,25 @@ impl Watch {
     /// since anything reported while disconnected was missed. A failed attempt schedules the
     /// next one. Errors only when the server says the session or pane is gone.
     fn resume(&mut self, link: &mut Link, out: &Out, shown: &mut Status) -> Result<Option<Status>> {
-        let attempt = || -> Result<(Rex, u64, Records)> {
+        let attempt = || -> Result<(Rex, u64, Records, usize)> {
             let mut rex = Rex::connect(link.endpoint, link.call_timeout, link.token.as_deref())?;
             let (_, view) = rex.attach(&self.sid)?;
             if !pane::panes(&view).iter().any(|p| p.block_id == self.bid) {
                 return Err(Gone("the pane was closed").into());
             }
             let (seq, records) = rex.program_status(&self.sid, &self.bid)?;
-            Ok((rex, seq, records))
+            let shells = shell_count(&mut rex, &self.sid, &self.bid)?;
+            Ok((rex, seq, records, shells))
         };
         match attempt() {
-            Ok((rex, seq, records)) => {
+            Ok((rex, seq, records, shells)) => {
                 link.restore(rex);
                 connection_note(out, "restored", "reconnected");
                 // Events from the new connection up to `seq` are already in `records`.
                 self.seq = seq;
-                if records != self.records {
+                if records != self.records || shells != self.shells {
                     self.records = records;
+                    self.shells = shells;
                     return Ok(self.changed(out, shown));
                 }
                 Ok(None)
@@ -1586,7 +1640,7 @@ impl Watch {
     /// The records changed after the watch began: report the new status and see if it ends
     /// the watch.
     fn changed(&mut self, out: &Out, shown: &mut Status) -> Option<Status> {
-        let status = self.records.status();
+        let status = self.records.status().with_shells(self.shells);
         if status != *shown {
             *shown = status;
             if out.json {
@@ -1604,6 +1658,7 @@ impl Watch {
             "type": "status",
             "status": status,
             "label": status.label(),
+            "shells": self.shells,
             "msg": self.records.msg(),
         })
     }
