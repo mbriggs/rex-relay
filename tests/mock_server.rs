@@ -229,7 +229,7 @@ impl Mock {
             .add(Owned {
                 endpoint: self.canonical_endpoint(),
                 session_id: session_id.into(),
-                label: "grokbot-original".into(),
+                label: Some("original".into()),
                 created_at: "2026-11-04T00:00:00.000Z".into(),
                 purpose: purpose.map(Into::into),
             })
@@ -489,7 +489,8 @@ fn handle(
             .ok_or_else(|| "no such session".into()),
         "session.create" => {
             s.created.push(payload.clone());
-            let label = payload["label"].as_str().unwrap().to_owned();
+            // Rex names a session itself when the request has no label.
+            let label = payload["label"].as_str().unwrap_or("Session 2").to_owned();
             s.sessions
                 .push(("session:new".into(), label, vec![claude(vec![])]));
             Ok(json!({"session_id": "session:new", "initial_windows": [
@@ -552,11 +553,11 @@ const SID: &str = "session:0000-demo";
 
 const FOREIGN: &str = "session:0000-work";
 
-/// An owned session `grokbot-demo` and a foreign one, `work`.
+/// An owned session `demo` and a foreign one, `work`.
 fn demo(records: Vec<Value>, after: AfterEnter) -> Mock {
     let mock = Mock::start(
         vec![
-            (SID, "grokbot-demo", vec![shell(), claude(records)]),
+            (SID, "demo", vec![shell(), claude(records)]),
             (FOREIGN, "work", vec![claude(vec![])]),
         ],
         after,
@@ -568,13 +569,7 @@ fn demo(records: Vec<Value>, after: AfterEnter) -> Mock {
 #[test]
 fn send_pastes_streams_and_exits_done() {
     let mock = demo(vec![record("done", None, None)], AfterEnter::Done);
-    let output = mock.rexctl(&[
-        "send",
-        "grokbot-demo",
-        "fix the bug\nplease",
-        "--poll",
-        "100ms",
-    ]);
+    let output = mock.rexctl(&["send", "demo", "fix the bug\nplease", "--poll", "100ms"]);
     assert_eq!(code(&output), 0, "{output:?}");
     let text = stdout(&output);
     assert!(text.contains("● Fixed it."), "{text}");
@@ -620,7 +615,7 @@ fn send_json(mock: &Mock, timeout: &str) -> (Output, Vec<Value>) {
     let output = mock.rexctl(&[
         "--json",
         "send",
-        "grokbot-demo",
+        "demo",
         "go",
         "--quiet",
         "--timeout",
@@ -714,14 +709,7 @@ fn send_exits_16_when_the_server_stays_unreachable() {
 #[test]
 fn send_json_reports_needs_approval() {
     let mock = demo(vec![], AfterEnter::Blocked("permission"));
-    let output = mock.rexctl(&[
-        "--json",
-        "send",
-        "grokbot-demo",
-        "run the tests",
-        "--poll",
-        "100ms",
-    ]);
+    let output = mock.rexctl(&["--json", "send", "demo", "run the tests", "--poll", "100ms"]);
     assert_eq!(code(&output), 10, "{output:?}");
     let events = json_lines(&output);
     assert_eq!(events[0]["type"], "sent");
@@ -748,7 +736,7 @@ fn send_json_reports_needs_approval() {
 fn send_exit_codes_for_question_and_sign_in() {
     for (kind, exit) in [("question", 11), ("auth", 13)] {
         let mock = demo(vec![], AfterEnter::Blocked(kind));
-        let output = mock.rexctl(&["send", "grokbot-demo", "go", "--quiet"]);
+        let output = mock.rexctl(&["send", "demo", "go", "--quiet"]);
         assert_eq!(code(&output), exit, "{kind}: {output:?}");
     }
 }
@@ -759,7 +747,7 @@ fn send_times_out() {
     let output = mock.rexctl(&[
         "--json",
         "send",
-        "grokbot-demo",
+        "demo",
         "go",
         "--timeout",
         "1s",
@@ -795,9 +783,9 @@ fn ownership_follows_the_session_id_not_the_label() {
     // Claude Code renamed the owned session, and someone made a foreign session that looks
     // like one of ours.
     mock.rename(SID, "Fix the flaky CI job");
-    mock.rename(FOREIGN, "grokbot-demo");
+    mock.rename(FOREIGN, "demo");
 
-    let output = mock.rexctl(&["send", "grokbot-demo", "hello"]);
+    let output = mock.rexctl(&["send", "demo", "hello"]);
     assert_eq!(code(&output), 3, "lookalike label: {output:?}");
     assert!(mock.writes().is_empty());
     assert!(
@@ -822,7 +810,7 @@ fn ownership_follows_the_session_id_not_the_label() {
         .add(Owned {
             endpoint: "https://rex-host.example.ts.net".into(),
             session_id: SID.into(),
-            label: "grokbot-demo".into(),
+            label: Some("demo".into()),
             created_at: "2026-11-04T00:00:00.000Z".into(),
             purpose: None,
         })
@@ -834,11 +822,11 @@ fn ownership_follows_the_session_id_not_the_label() {
 #[test]
 fn ambiguous_labels_are_an_error() {
     let mock = demo(vec![], AfterEnter::Done);
-    mock.rename(FOREIGN, "grokbot-demo");
+    mock.rename(FOREIGN, "demo");
     for args in [
-        &["status", "grokbot-demo"][..],
-        &["close", "grokbot-demo"],
-        &["send", "grokbot-demo", "hi", "--allow-foreign"],
+        &["status", "demo"][..],
+        &["close", "demo"],
+        &["send", "demo", "hi", "--allow-foreign"],
     ] {
         let output = mock.rexctl(args);
         assert_eq!(code(&output), 1, "{args:?}: {output:?}");
@@ -924,11 +912,7 @@ fn close_forgets_owned_sessions_that_are_already_gone() {
 fn a_corrupt_registry_fails_closed() {
     let mock = demo(vec![], AfterEnter::Done);
     std::fs::write(mock.registry().path(), "{oops").unwrap();
-    for args in [
-        &["send", "grokbot-demo", "hi"][..],
-        &["close", "grokbot-demo"],
-        &["list"],
-    ] {
+    for args in [&["send", "demo", "hi"][..], &["close", "demo"], &["list"]] {
         let output = mock.rexctl(args);
         assert_eq!(code(&output), 1, "{args:?}: {output:?}");
     }
@@ -942,17 +926,17 @@ fn send_refuses_pending_prompts_without_answer() {
         vec![record("blocked", Some("question"), Some("Which file?"))],
         AfterEnter::Done,
     );
-    let output = mock.rexctl(&["send", "grokbot-demo", "src/lib.rs"]);
+    let output = mock.rexctl(&["send", "demo", "src/lib.rs"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(mock.writes().is_empty());
-    let output = mock.rexctl(&["send", "grokbot-demo", "src/lib.rs", "--answer", "--quiet"]);
+    let output = mock.rexctl(&["send", "demo", "src/lib.rs", "--answer", "--quiet"]);
     assert_eq!(code(&output), 0, "{output:?}");
 
     let mock = demo(
         vec![record("blocked", Some("auth"), None)],
         AfterEnter::Done,
     );
-    let output = mock.rexctl(&["send", "grokbot-demo", "hunter2", "--answer"]);
+    let output = mock.rexctl(&["send", "demo", "hunter2", "--answer"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(mock.writes().is_empty());
 }
@@ -977,8 +961,8 @@ fn send_refuses_menus_like_the_trust_dialog() {
     .map(String::from)
     .to_vec();
     for args in [
-        &["send", "grokbot-demo", "fix the bug"][..],
-        &["send", "grokbot-demo", "1", "--answer"],
+        &["send", "demo", "fix the bug"][..],
+        &["send", "demo", "1", "--answer"],
     ] {
         let output = mock.rexctl(args);
         assert_eq!(code(&output), 3, "{args:?}: {output:?}");
@@ -999,7 +983,7 @@ fn send_refuses_menus_like_the_trust_dialog() {
 
     // A shell prompt isn't Claude Code's either.
     mock.state.lock().unwrap().screen = vec!["$ ls".into(), "src".into(), "$".into()];
-    let output = mock.rexctl(&["send", "grokbot-demo", "hello"]);
+    let output = mock.rexctl(&["send", "demo", "hello"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(mock.writes().is_empty());
 }
@@ -1008,16 +992,16 @@ fn send_refuses_menus_like_the_trust_dialog() {
 fn send_rejects_bad_messages_before_writing() {
     let mock = demo(vec![], AfterEnter::Done);
     for message in ["up\x1b[A", "a\rb", "\x03"] {
-        let output = mock.rexctl(&["send", "grokbot-demo", message]);
+        let output = mock.rexctl(&["send", "demo", message]);
         assert_eq!(code(&output), 3, "{message:?}: {output:?}");
     }
     let big = "x".repeat(40 * 1024);
-    let output = mock.rexctl(&["send", "grokbot-demo", &big]);
+    let output = mock.rexctl(&["send", "demo", &big]);
     assert_eq!(code(&output), 3);
-    let output = mock.rexctl(&["send", "grokbot-demo", "four", "--max-bytes", "3"]);
+    let output = mock.rexctl(&["send", "demo", "four", "--max-bytes", "3"]);
     assert_eq!(code(&output), 3);
     // --max-bytes can only lower the configured limit.
-    let output = mock.rexctl(&["send", "grokbot-demo", &big, "--max-bytes", "1000000"]);
+    let output = mock.rexctl(&["send", "demo", &big, "--max-bytes", "1000000"]);
     assert_eq!(code(&output), 3);
     assert!(mock.writes().is_empty());
     let audit = mock.audit();
@@ -1033,7 +1017,7 @@ fn send_rejects_bad_messages_before_writing() {
 fn endpoints_outside_the_allowlist_are_never_contacted() {
     let mock = demo(vec![], AfterEnter::Done);
     mock.write_config(&["https://rex-host.example.ts.net"]);
-    for args in [&["list"][..], &["send", "grokbot-demo", "hi"]] {
+    for args in [&["list"][..], &["send", "demo", "hi"]] {
         let output = mock.rexctl(args);
         assert_eq!(code(&output), 3, "{args:?}: {output:?}");
     }
@@ -1080,18 +1064,18 @@ fn wait_returns_the_current_stop_status() {
         (vec![record("error", None, Some("crashed"))], 14),
     ] {
         let mock = demo(records, AfterEnter::Done);
-        let output = mock.rexctl(&["wait", "grokbot-demo", "--quiet"]);
+        let output = mock.rexctl(&["wait", "demo", "--quiet"]);
         assert_eq!(code(&output), exit, "{output:?}");
         assert!(mock.writes().is_empty());
         assert!(mock.audit().is_empty(), "wait is read-only");
     }
     let mock = demo(vec![record("working", None, None)], AfterEnter::Done);
-    let output = mock.rexctl(&["wait", "grokbot-demo", "--timeout", "1s"]);
+    let output = mock.rexctl(&["wait", "demo", "--timeout", "1s"]);
     assert_eq!(code(&output), 15, "{output:?}");
 }
 
 #[test]
-fn new_creates_prefixed_session_and_audits() {
+fn new_creates_a_session_and_audits() {
     let mock = demo(vec![], AfterEnter::Done);
     let output = mock.rexctl(&[
         "--json",
@@ -1107,7 +1091,7 @@ fn new_creates_prefixed_session_and_audits() {
     assert_eq!(code(&output), 0, "{output:?}");
     let event = &json_lines(&output)[0];
     assert_eq!(event["type"], "created");
-    assert_eq!(event["label"], "grokbot-fix-ci");
+    assert_eq!(event["label"], "fix-ci");
     assert_eq!(event["session_id"], "session:new");
     assert_eq!(event["block_id"], "block:new");
     assert_eq!(event["purpose"], "Fix the CI pipeline");
@@ -1117,7 +1101,7 @@ fn new_creates_prefixed_session_and_audits() {
         .find(&mock.canonical_endpoint(), &"session:new".into())
         .unwrap()
         .expect("recorded as owned");
-    assert_eq!(owned.label, "grokbot-fix-ci");
+    assert_eq!(owned.label.as_deref(), Some("fix-ci"));
     assert_eq!(owned.purpose.as_deref(), Some("Fix the CI pipeline"));
     assert!(owned.created_at.ends_with('Z'));
     #[cfg(unix)]
@@ -1131,7 +1115,7 @@ fn new_creates_prefixed_session_and_audits() {
     }
 
     let created = mock.state.lock().unwrap().created.clone();
-    assert_eq!(created[0]["label"], "grokbot-fix-ci");
+    assert_eq!(created[0]["label"], "fix-ci");
     let block = &created[0]["initial_windows"][0]["layout"]["block"];
     assert_eq!(block["flavor"], "com.superlogical.terminal.shell");
     assert_eq!(block["options"]["cwd"], "/srv/app");
@@ -1145,7 +1129,7 @@ fn new_creates_prefixed_session_and_audits() {
     assert_eq!(audit[0]["result"], "created");
     assert_eq!(audit[0]["session"], "session:new");
 
-    let again = mock.rexctl(&["new", "grokbot-fix-ci"]);
+    let again = mock.rexctl(&["new", "fix-ci"]);
     assert_eq!(code(&again), 3, "duplicate label: {again:?}");
     let bad = mock.rexctl(&["new", "x", "--purpose", "two\nlines"]);
     assert_eq!(code(&bad), 3, "{bad:?}");
@@ -1168,6 +1152,32 @@ fn new_creates_prefixed_session_and_audits() {
 }
 
 #[test]
+fn new_without_a_label_lets_rex_name_the_session() {
+    let mock = demo(vec![], AfterEnter::Done);
+    let output = mock.rexctl(&["new", "--cwd", "/srv/app"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(stdout(&output), "session:new\t\tblock:new\n");
+    let created = mock.state.lock().unwrap().created.clone();
+    assert!(created[0].get("label").is_none(), "{created:?}");
+    let owned = mock
+        .registry()
+        .find(&mock.canonical_endpoint(), &"session:new".into())
+        .unwrap()
+        .expect("recorded as owned");
+    assert_eq!(owned.label, None);
+    let raw: Value =
+        serde_json::from_str(&std::fs::read_to_string(mock.registry().path()).unwrap()).unwrap();
+    let entry = raw["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["session_id"] == "session:new")
+        .unwrap();
+    assert!(entry.get("label").is_none(), "{entry}");
+    assert!(mock.audit()[0].get("session_label").is_none());
+}
+
+#[test]
 fn list_status_and_read() {
     let mock = demo(
         vec![record("working", None, Some("Editing files"))],
@@ -1178,24 +1188,24 @@ fn list_status_and_read() {
     assert_eq!(code(&output), 0, "{output:?}");
     let sessions = json_lines(&output);
     assert_eq!(sessions.len(), 2);
-    assert_eq!(sessions[0]["label"], "grokbot-demo");
+    assert_eq!(sessions[0]["label"], "demo");
     assert_eq!(sessions[0]["owned"], true);
     assert_eq!(sessions[0]["purpose"], "demo the relay");
-    assert_eq!(sessions[0]["created_label"], "grokbot-original");
+    assert_eq!(sessions[0]["created_label"], "original");
     assert_eq!(sessions[1]["owned"], false);
     assert!(sessions[1]["purpose"].is_null());
 
     // Ownership is shown by id, so a renamed session stays marked and a lookalike isn't.
     mock.rename(SID, "Renamed");
-    mock.rename(FOREIGN, "grokbot-lookalike");
+    mock.rename(FOREIGN, "lookalike");
     let output = mock.rexctl(&["list"]);
     assert_eq!(
         stdout(&output),
-        format!("* {SID}\tRenamed\tdemo the relay\n  {FOREIGN}\tgrokbot-lookalike\n")
+        format!("* {SID}\tRenamed\tdemo the relay\n  {FOREIGN}\tlookalike\n")
     );
-    mock.rename(SID, "grokbot-demo");
+    mock.rename(SID, "demo");
 
-    let output = mock.rexctl(&["--json", "status", "grokbot-demo"]);
+    let output = mock.rexctl(&["--json", "status", "demo"]);
     assert_eq!(code(&output), 0, "{output:?}");
     let status = &json_lines(&output)[0];
     assert_eq!(status["block_id"], claude(vec![]).id);
@@ -1209,28 +1219,25 @@ fn list_status_and_read() {
         "{output:?}"
     );
 
-    let output = mock.rexctl(&["read", "grokbot-demo", "--lines", "2"]);
+    let output = mock.rexctl(&["read", "demo", "--lines", "2"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(stdout(&output), format!("{}\n{}\n", BOX[2], BOX[3]));
 }
 
 #[test]
 fn panes_without_claude_need_block() {
-    let mock = Mock::start(
-        vec![(SID, "grokbot-shell", vec![shell()])],
-        AfterEnter::Done,
-    );
+    let mock = Mock::start(vec![(SID, "shell", vec![shell()])], AfterEnter::Done);
     mock.own(SID, None);
-    let output = mock.rexctl(&["status", "grokbot-shell"]);
+    let output = mock.rexctl(&["status", "shell"]);
     assert_eq!(code(&output), 1, "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("--block"));
 
-    let output = mock.rexctl(&["--json", "status", "grokbot-shell", "--block", "5he11"]);
+    let output = mock.rexctl(&["--json", "status", "shell", "--block", "5he11"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(json_lines(&output)[0]["block_id"], shell().id);
 
     // The shell never turned on bracketed paste, so send won't type into it.
-    let output = mock.rexctl(&["send", "grokbot-shell", "ls", "--block", "5he11"]);
+    let output = mock.rexctl(&["send", "shell", "ls", "--block", "5he11"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(mock.writes().is_empty());
 }

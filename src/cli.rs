@@ -46,11 +46,11 @@ pub enum Command {
         #[arg(long, default_value_t = 100, value_name = "N")]
         lines: usize,
     },
-    /// Create a session that runs Claude Code, and record it as owned by rexctl. Its initial
-    /// label gets the configured prefix.
+    /// Create a session that runs Claude Code, and record its id as owned by rexctl.
     New {
-        /// The session's initial label, before the prefix.
-        label: String,
+        /// The session's initial label. Claude Code may rename the session later; rexctl tracks
+        /// it by id. Without a label, Rex picks one.
+        label: Option<String>,
         /// The directory the pane starts in, on the Rex host.
         #[arg(long, value_name = "DIR")]
         cwd: Option<String>,

@@ -25,8 +25,9 @@ pub struct Owned {
     /// The canonical endpoint the session lives on.
     pub endpoint: String,
     pub session_id: SessionId,
-    /// The label it was created with. Its current label may differ.
-    pub label: String,
+    /// The label it was created with, if `new` was given one. Its current label may differ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
@@ -211,7 +212,7 @@ mod tests {
         Owned {
             endpoint: endpoint.into(),
             session_id: id.into(),
-            label: "grokbot-x".into(),
+            label: Some("fix-ci".into()),
             created_at: "2026-11-04T00:00:00.000Z".into(),
             purpose: Some("fix CI".into()),
         }

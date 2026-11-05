@@ -60,15 +60,6 @@ pub fn check_label(label: &str) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// `label` with the relay's prefix, added once.
-pub fn prefixed_label(label: &str, prefix: &str) -> String {
-    if label.starts_with(prefix) {
-        label.to_owned()
-    } else {
-        format!("{prefix}{label}")
-    }
-}
-
 /// `--purpose`: one line of plain text.
 pub fn check_purpose(purpose: &str) -> Result<(), Refusal> {
     if purpose.trim().is_empty() {
@@ -181,10 +172,8 @@ mod tests {
     }
 
     #[test]
-    fn labels_and_prefixes() {
-        assert_eq!(prefixed_label("fix", "grokbot-"), "grokbot-fix");
-        assert_eq!(prefixed_label("grokbot-fix", "grokbot-"), "grokbot-fix");
-        check_label("grokbot-fix").unwrap();
+    fn labels_are_plain_text() {
+        check_label("fix-ci").unwrap();
         assert!(check_label("").is_err());
         assert!(check_label("a\nb").is_err());
         assert!(check_label(&"x".repeat(129)).is_err());
@@ -193,10 +182,10 @@ mod tests {
     #[test]
     fn ownership_is_by_registry_not_label() {
         check_send_owned(true, "session:1", "renamed by claude", false).unwrap();
-        assert!(check_send_owned(false, "session:2", "grokbot-lookalike", false).is_err());
+        assert!(check_send_owned(false, "session:2", "lookalike", false).is_err());
         check_send_owned(false, "session:2", "work", true).unwrap();
         check_close_owned(true, "session:1", "anything").unwrap();
-        assert!(check_close_owned(false, "session:2", "grokbot-lookalike").is_err());
+        assert!(check_close_owned(false, "session:2", "lookalike").is_err());
     }
 
     #[test]

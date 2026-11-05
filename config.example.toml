@@ -12,11 +12,6 @@ allowed_endpoints = [
   # "unix:///run/user/1000/rex/server.sock",
 ]
 
-# The prefix `new` adds to the initial label of the sessions it creates. It's
-# only a label: Claude Code renames sessions, so ownership is tracked by
-# session id in the registry below, never by label.
-label_prefix = "grokbot-"
-
 # The largest message `send` accepts, in bytes.
 max_message_bytes = 32768
 

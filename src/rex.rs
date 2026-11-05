@@ -220,10 +220,11 @@ impl Rex {
         Ok(())
     }
 
-    /// Creates a session with one window whose one terminal runs `command` in `cwd`.
+    /// Creates a session with one window whose one terminal runs `command` in `cwd`. Without a
+    /// label, the server picks one.
     pub fn create(
         &mut self,
-        label: &str,
+        label: Option<&str>,
         cwd: Option<&str>,
         command: &[String],
     ) -> Result<Created> {
@@ -237,11 +238,11 @@ impl Rex {
         let window = session::CreateInitialWindow::new()
             .window_label("claude")
             .layout(layout);
-        let created = self.client.call(
-            session::Create::new()
-                .label(label)
-                .initial_windows([window]),
-        )?;
+        let mut request = session::Create::new().initial_windows([window]);
+        if let Some(label) = label {
+            request = request.label(label);
+        }
+        let created = self.client.call(request)?;
         let block = created
             .initial_windows
             .into_iter()

@@ -137,7 +137,14 @@ fn execute(cli: &Cli, out: &Out) -> Result<i32> {
             cwd,
             cmd,
             purpose,
-        } => new(&ctx, out, label, cwd.as_deref(), cmd, purpose.as_deref()),
+        } => new(
+            &ctx,
+            out,
+            label.as_deref(),
+            cwd.as_deref(),
+            cmd,
+            purpose.as_deref(),
+        ),
         Command::Send(args) => send(&ctx, out, args),
         Command::Wait(args) => wait(&ctx, out, args),
         Command::Close { session } => close(&ctx, out, session),
@@ -209,7 +216,7 @@ fn list(ctx: &Ctx, out: &Out) -> Result<i32> {
                 "label": s.label,
                 "owned": mine.is_some(),
                 "purpose": mine.and_then(|o| o.purpose.as_deref()),
-                "created_label": mine.map(|o| o.label.as_str()),
+                "created_label": mine.and_then(|o| o.label.as_deref()),
                 "created_at": mine.map(|o| o.created_at.as_str()),
             }));
         } else {
@@ -299,16 +306,16 @@ fn last_lines(text: &str, count: usize) -> Vec<&str> {
 fn new(
     ctx: &Ctx,
     out: &Out,
-    label: &str,
+    label: Option<&str>,
     cwd: Option<&str>,
     cmd: &Program,
     purpose: Option<&str>,
 ) -> Result<i32> {
-    let label = guard::prefixed_label(label.trim(), ctx.config.label_prefix());
+    let label = label.map(str::trim);
     let purpose = purpose.map(str::trim);
     let mut entry = Entry::new("new", ctx.endpoint_key());
-    entry.session_label = Some(label.clone());
-    let result = create(ctx, &label, cwd, cmd, purpose, &mut entry);
+    entry.session_label = label.map(str::to_owned);
+    let result = create(ctx, label, cwd, cmd, purpose, &mut entry);
     entry.result = match &result {
         Ok(_) => "created".to_owned(),
         Err(error) => audit_error(error),
@@ -324,20 +331,26 @@ fn new(
             "purpose": purpose,
         }));
     } else {
-        out.line(&format!("{session_id}\t{label}\t{block_id}"));
+        // The label column stays, empty without a label, so the columns don't shift.
+        out.line(&format!(
+            "{session_id}\t{}\t{block_id}",
+            label.unwrap_or_default()
+        ));
     }
     Ok(exit::OK)
 }
 
 fn create(
     ctx: &Ctx,
-    label: &str,
+    label: Option<&str>,
     cwd: Option<&str>,
     cmd: &Program,
     purpose: Option<&str>,
     entry: &mut Entry,
 ) -> Result<(SessionId, BlockId)> {
-    guard::check_label(label)?;
+    if let Some(label) = label {
+        guard::check_label(label)?;
+    }
     if let Some(purpose) = purpose {
         guard::check_purpose(purpose)?;
     }
@@ -347,7 +360,10 @@ fn create(
         return Err(Refusal("--cwd must be a plain path".into()).into());
     }
     let mut rex = ctx.connect()?;
-    if rex.sessions()?.iter().any(|s| s.label == label) {
+    // A duplicate label would make the label ambiguous for every later command.
+    if let Some(label) = label
+        && rex.sessions()?.iter().any(|s| s.label == label)
+    {
         return Err(Refusal(format!("a session labelled {label:?} already exists")).into());
     }
     let created = rex.create(label, cwd, &cmd.0)?;
@@ -359,7 +375,7 @@ fn create(
         .add(Owned {
             endpoint: ctx.endpoint_key(),
             session_id: created.session.clone(),
-            label: label.to_owned(),
+            label: label.map(str::to_owned),
             created_at: audit::now(),
             purpose: purpose.map(str::to_owned),
         })

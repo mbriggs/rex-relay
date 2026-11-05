@@ -12,9 +12,9 @@ exit codes.
 
 ```console
 $ rexctl new fix-ci --cwd /srv/app --purpose "Fix the failing CI job"
-session:…	grokbot-fix-ci	block:…
-$ rexctl send grokbot-fix-ci "The CI job fails on main. Find out why and fix it."
-rexctl: sent 49 bytes to grokbot-fix-ci block:…
+session:…	fix-ci	block:…
+$ rexctl send fix-ci "The CI job fails on main. Find out why and fix it."
+rexctl: sent 49 bytes to fix-ci block:…
 > The CI job fails on main. Find out why and fix it.
 ● I'll start by looking at the workflow…
 …
@@ -87,7 +87,6 @@ by `REX_RELAY_CONFIG` or `--config`). See [`config.example.toml`](config.example
 ```toml
 endpoint = "https://rex-host.example.ts.net"
 allowed_endpoints = ["https://rex-host.example.ts.net"]
-label_prefix = "grokbot-"
 max_message_bytes = 32768
 timeout = "30m"
 call_timeout = "10s"
@@ -115,7 +114,7 @@ may no longer work; the id always does. A label that matches more than one sessi
 | `rexctl list` | Lists sessions. `*` (or `"owned": true`) marks sessions rexctl created, followed by their purpose. |
 | `rexctl status <session> [--block ID]` | Shows the Claude Code pane's status and message. |
 | `rexctl read <session> [--lines N] [--block ID]` | Prints the pane's last N lines (default 100; 0 for all). |
-| `rexctl new <label> [--cwd DIR] [--cmd claude] [--purpose TEXT]` | Creates a session with initial label `<prefix><label>`, whose one pane runs `--cmd` (default `claude`, with arguments quoted as in a shell, though no shell runs it) in `--cwd`, and records it in the ownership registry. |
+| `rexctl new [label] [--cwd DIR] [--cmd claude] [--purpose TEXT]` | Creates a session with the initial label `label` (or one Rex picks), whose one pane runs `--cmd` (default `claude`, with arguments quoted as in a shell, though no shell runs it) in `--cwd`, and records it in the ownership registry. |
 | `rexctl send <session> "msg"` | Pastes the message into the Claude Code pane, presses Enter once, then streams the pane's new output until Claude Code stops. Owned sessions only, unless `--allow-foreign`. |
 | `rexctl wait <session>` | Streams the pane's new output until Claude Code stops working. Returns at once if it isn't working. |
 | `rexctl close <session>` | Closes a session rexctl created, and removes it from the registry. There is no override: other sessions are never closed. |
@@ -132,7 +131,7 @@ may no longer work; the id always does. A label that matches more than one sessi
     {
       "endpoint": "https://rex-host.example.ts.net",
       "session_id": "session:…",
-      "label": "grokbot-fix-ci",
+      "label": "fix-ci",
       "created_at": "2026-11-04T12:00:00.000Z",
       "purpose": "Fix the failing CI job"
     }
@@ -140,8 +139,8 @@ may no longer work; the id always does. A label that matches more than one sessi
 }
 ```
 
-A session is *owned* when its id is listed for the endpoint in use; `label` is only the label it
-was created with. Changes take an exclusive lock on `owned.json.lock` and replace the file
+A session is *owned* when its id is listed for the endpoint in use. `label` is only the label it
+was created with, and is left out when `new` got none. Changes take an exclusive lock on `owned.json.lock` and replace the file
 atomically (write to a temporary file, fsync, rename); the file is `0600`. A registry that can't
 be parsed is an error, never treated as empty. `close` on a registered id that the server no
 longer has removes it from the registry without sending anything.
@@ -202,7 +201,7 @@ until they scroll up or the command ends.
 `--json` prints one JSON object per line on stdout:
 
 ```json
-{"type":"sent","session_id":"session:…","session_label":"grokbot-fix-ci","block_id":"block:…","bytes":49}
+{"type":"sent","session_id":"session:…","session_label":"fix-ci","block_id":"block:…","bytes":49}
 {"type":"status","status":"working","label":"Working","msg":null}
 {"type":"output","line":"● I'll start by looking at the workflow…"}
 {"type":"result","status":"needs_approval","label":"Needs approval","msg":"Allow Bash(cargo test)?","exit_code":10}
@@ -237,8 +236,8 @@ and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 
 1. **Ownership by id.** `send` refuses any session whose id isn't in the ownership registry for
    the endpoint in use, unless `--allow-foreign`; the check happens before rexctl attaches to the
-   session. Labels prove nothing: Claude Code renames sessions, and anyone can name a session
-   `grokbot-…`. The prefix (default `grokbot-`) is only the initial label `new` gives.
+   session. Labels prove nothing: Claude Code renames sessions, and anyone can give a session
+   any label.
 2. **Closing owned sessions only.** `close` closes a session only if its id is in the registry;
    there is no flag to override that. A refused `close` sends no close request. Foreign sessions
    can never be closed or killed through rexctl.
@@ -294,7 +293,7 @@ dedicated config whose `allowed_endpoints` holds only that server.
 - [ ] With it allowed, `rexctl list` shows the sessions; an `https://` endpoint connects over
       TLS (Tailscale Serve).
 - [ ] `SID=$(rexctl --json new smoke --cwd /tmp/rex-relay-smoke --purpose "live smoke test" | jq -r .session_id)`
-      creates `grokbot-smoke`, Claude Code starts in the pane, `owned.json` gains the id with
+      creates `smoke`, Claude Code starts in the pane, `owned.json` gains the id with
       its purpose, and the audit log gains a `created` entry.
 - [ ] `rexctl list` marks the session `*` and shows the purpose.
 - [ ] `rexctl status "$SID"` finds the Claude Code pane and shows its status.
@@ -315,15 +314,15 @@ dedicated config whose `allowed_endpoints` holds only that server.
       lost`, then `connection restored`, and still exits 0 when Claude Code finishes. Claude Code
       received the message once.
 - [ ] With the network down for longer than `--timeout`, `send` exits 16.
-- [ ] Create a session by hand in Rex and label it `grokbot-fake`: `rexctl send grokbot-fake "hi"`
-      exits 3 (not in the registry); with `--allow-foreign` it sends; `rexctl close grokbot-fake`
+- [ ] Create a session by hand in Rex and label it `fake`: `rexctl send fake "hi"`
+      exits 3 (not in the registry); with `--allow-foreign` it sends; `rexctl close fake`
       exits 3 and the session stays open.
 - [ ] A message with an escape character (`$'\e[A'`) or over 32 KiB exits 3.
 - [ ] In a session with a shell pane and a Claude Code pane, `send` picks Claude Code;
       `--block` with the shell's id is refused (no bracketed paste).
 - [ ] `rexctl read "$SID" --lines 20` prints the pane's last 20 lines.
 - [ ] `rexctl close "$SID"` closes the session, removes it from `owned.json`, and logs `closed`.
-      Close `grokbot-fake` in Rex by hand.
+      Close `fake` in Rex by hand.
 
 ## Security
 

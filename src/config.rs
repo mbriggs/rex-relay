@@ -6,7 +6,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-pub const DEFAULT_LABEL_PREFIX: &str = "grokbot-";
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 32 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -23,9 +22,6 @@ pub struct Config {
     /// Every endpoint the relay may connect to. Empty refuses all of them.
     #[serde(default)]
     pub allowed_endpoints: Vec<String>,
-    /// The prefix `new` gives the labels of the sessions it creates. It marks nothing:
-    /// ownership is by session id, in the registry.
-    pub label_prefix: Option<String>,
     /// The largest message `send` accepts, in bytes.
     pub max_message_bytes: Option<usize>,
     /// How long `send` and `wait` wait by default, such as `30m`.
@@ -55,11 +51,6 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
-        if let Some(prefix) = &self.label_prefix
-            && (prefix.is_empty() || prefix.chars().any(char::is_control))
-        {
-            bail!("label_prefix must be non-empty text");
-        }
         if self.max_message_bytes == Some(0) {
             bail!("max_message_bytes must be positive");
         }
@@ -75,10 +66,6 @@ impl Config {
             }
         }
         Ok(())
-    }
-
-    pub fn label_prefix(&self) -> &str {
-        self.label_prefix.as_deref().unwrap_or(DEFAULT_LABEL_PREFIX)
     }
 
     pub fn max_message_bytes(&self) -> usize {
@@ -189,7 +176,6 @@ mod tests {
             r#"
             endpoint = "https://rex-host.example.ts.net"
             allowed_endpoints = ["https://rex-host.example.ts.net"]
-            label_prefix = "bot-"
             max_message_bytes = 1024
             timeout = "5m"
             audit_log = "/tmp/audit.jsonl"
@@ -197,7 +183,6 @@ mod tests {
         )
         .unwrap();
         config.validate().unwrap();
-        assert_eq!(config.label_prefix(), "bot-");
         assert_eq!(config.max_message_bytes(), 1024);
         assert_eq!(config.timeout(), Duration::from_secs(300));
         assert_eq!(
@@ -219,7 +204,6 @@ mod tests {
     #[test]
     fn defaults() {
         let config = Config::default();
-        assert_eq!(config.label_prefix(), "grokbot-");
         assert_eq!(config.max_message_bytes(), 32 * 1024);
         assert_eq!(config.timeout(), Duration::from_secs(1800));
         assert_eq!(config.call_timeout(), Duration::from_secs(10));
@@ -230,7 +214,6 @@ mod tests {
     fn rejects_unknown_keys_and_bad_values() {
         assert!(toml::from_str::<Config>("endpont = \"x\"").is_err());
         for bad in [
-            "label_prefix = \"\"",
             "max_message_bytes = 0",
             "timeout = \"soon\"",
             "call_timeout = \"0s\"",
