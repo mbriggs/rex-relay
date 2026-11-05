@@ -1,0 +1,35 @@
+rexrs — vendored copy
+=====================
+
+This directory is a vendored copy of the rexrs crate, a typed Rust client for the Rex server's
+control API. It is not part of rex-relay's own code.
+
+Origin
+------
+
+- Upstream crate:  https://github.com/a10y/rexrs
+  at commit 780be3f9f0455c758273e57199af30bdaa145cf1
+- Patched copy:    https://github.com/shuv1337/rex-rune, directory vendor/rexrs,
+  at commit 9817d40496a703d33aabcae208e71774d1709a5a
+
+The patched copy adds API revision 8 (program status, session.bootstrap data tickets) and an
+explicit API revision range for HELLO negotiation. REX-LINUX.md, kept unchanged from the patched
+copy, describes those changes.
+
+License
+-------
+
+rexrs is licensed MIT OR Apache-2.0, at your option; see LICENSE-MIT and LICENSE-APACHE. The
+upstream manifest declares that license; the license texts were added by the patched copy.
+
+Changes in this copy
+--------------------
+
+The source files under src/, Cargo.toml, README.md, REX-LINUX.md, the license files,
+.gitignore, and tests/bootstrap.rs are unchanged from the patched copy. Not vendored here:
+codegen/ (the API snapshot and generator) and the remaining tests (tests/api_examples.rs,
+tests/live.rs, tests/live_async.rs). README.md and REX-LINUX.md still mention them; get them
+from the origin repositories above to regenerate the API types or to run the crate's own tests.
+
+rex-relay builds this crate with `default-features = false, features = ["tungstenite"]` and
+supplies its own TLS stream (rustls) to `TungsteniteTransport::handshake`.
