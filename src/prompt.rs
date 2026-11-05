@@ -32,6 +32,9 @@ pub struct Reading {
     /// The text in the input box that nobody sent, if the screen is the prompt and the box
     /// isn't empty. Faint text, such as the placeholder, doesn't count.
     pub input: Option<String>,
+    /// Background shells the footer under the prompt says are still running, such as
+    /// `1 shell still running`. Claude Code ends its turn without waiting for them.
+    pub shells: usize,
 }
 
 /// Reads the bottom of a pane's text: Rex's `vt` format, or plain text.
@@ -47,9 +50,13 @@ pub fn read(screen: &str) -> Reading {
     if let Some(at) = prompt
         && !bottom[at + 1..].iter().any(|l| is_menu_line(&l.plain))
     {
+        let footer = bottom[at + 1..]
+            .iter()
+            .skip_while(|l| !is_rule(&l.plain) && !is_edge(&l.plain));
         return Reading {
             screen: Screen::Prompt,
             input: input(&bottom[at..]),
+            shells: footer.filter_map(|l| shell_count(&l.plain)).sum(),
         };
     }
     let screen = if bottom.iter().any(|l| is_menu_line(&l.plain)) {
@@ -60,7 +67,19 @@ pub fn read(screen: &str) -> Reading {
     Reading {
         screen,
         input: None,
+        shells: 0,
     }
+}
+
+/// The `N` in a footer line's `N shell(s)`.
+fn shell_count(line: &str) -> Option<usize> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    words.windows(2).find_map(|w| {
+        let noun = w[1].trim_end_matches(|c: char| !c.is_alphanumeric());
+        matches!(noun, "shell" | "shells")
+            .then(|| w[0].parse().ok())
+            .flatten()
+    })
 }
 
 /// What the bottom of a pane's text shows.
@@ -325,7 +344,8 @@ mod tests {
             read(&vt("")),
             Reading {
                 screen: Screen::Prompt,
-                input: None
+                input: None,
+                shells: 0,
             }
         );
         let placeholder = vt("\x1b[0m\x1b[2mTry \"fix lint errors\"\x1b[0m");
@@ -370,5 +390,25 @@ mod tests {
         let mut screen = current(&["❯ "]);
         screen.push_str(&"\noutput".repeat(BOTTOM));
         assert_eq!(classify(&screen), Screen::Unknown);
+    }
+
+    #[test]
+    fn counts_background_shells_in_the_footer_only() {
+        let with_footer = |input: &str, footer: &str| {
+            let mut screen = current(&["● Started 3 shells in the background.", RULE, input]);
+            screen.push_str(&format!("\n  {footer}"));
+            read(&screen).shells
+        };
+        assert_eq!(with_footer("❯ ", "? for shortcuts"), 0);
+        assert_eq!(with_footer("❯ ", "1 shell still running"), 1);
+        assert_eq!(
+            with_footer("❯ ", "⏵⏵ auto mode on · 3 shells still running"),
+            3
+        );
+        assert_eq!(with_footer("❯ kill 2 shells", "? for shortcuts"), 0);
+        assert_eq!(
+            read("$ echo 1 shell still running\n1 shell still running").shells,
+            0
+        );
     }
 }

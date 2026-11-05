@@ -225,6 +225,13 @@ impl Mock {
         self.state.lock().unwrap().methods.clone()
     }
 
+    /// Replaces the footer line under the prompt box, where Claude Code counts background
+    /// shells.
+    fn set_footer(&self, footer: &str) {
+        let mut state = self.state.lock().unwrap();
+        *state.screen.last_mut().unwrap() = format!("  {footer}");
+    }
+
     fn rename(&self, session_id: &str, label: &str) {
         let mut state = self.state.lock().unwrap();
         let session = state
@@ -1565,6 +1572,57 @@ fn new_refuses_a_cwd_missing_on_the_rex_host() {
         let output = mock.cli(&["new", "--cwd", bad]);
         assert_eq!(code(&output), 2, "{bad}: {output:?}");
     }
+}
+
+#[test]
+fn status_counts_background_shells() {
+    let mock = demo(vec![record("done", None, None)], AfterEnter::Done);
+    for (footer, status, shells, text) in [
+        ("? for shortcuts", "done", 0, ": Done\n"),
+        (
+            "1 shell still running",
+            "background",
+            1,
+            ": Background (1 shell)\n",
+        ),
+        (
+            "3 shells still running",
+            "background",
+            3,
+            ": Background (3 shells)\n",
+        ),
+    ] {
+        mock.set_footer(footer);
+        let output = mock.cli(&["--json", "status", "demo"]);
+        let json = &json_lines(&output)[0];
+        assert_eq!(json["status"], status, "{footer}");
+        assert_eq!(json["shells"], shells, "{footer}");
+        let output = mock.cli(&["status", "demo"]);
+        assert!(stdout(&output).ends_with(text), "{output:?}");
+    }
+}
+
+#[test]
+fn wait_keeps_waiting_until_background_shells_finish() {
+    let mock = demo(vec![record("done", None, None)], AfterEnter::Done);
+    mock.set_footer("2 shells still running");
+    let output = mock.cli(&["--json", "wait", "demo", "--quiet", "--timeout", "1s"]);
+    assert_eq!(code(&output), 15, "{output:?}");
+    let result = json_lines(&output).pop().unwrap();
+    assert_eq!(result["last_status"], "background");
+
+    let state = mock.state.clone();
+    let finisher = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        *state.lock().unwrap().screen.last_mut().unwrap() = BOX[3].into();
+    });
+    let output = mock.cli(&["--json", "wait", "demo", "--quiet", "--timeout", "20s"]);
+    finisher.join().unwrap();
+    assert_eq!(code(&output), 0, "{output:?}");
+    let events = json_lines(&output);
+    assert_eq!(events[0]["status"], "background");
+    assert_eq!(events[0]["shells"], 2);
+    assert_eq!(events.last().unwrap()["status"], "done");
 }
 
 #[test]
