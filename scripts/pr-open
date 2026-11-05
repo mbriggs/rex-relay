@@ -1,0 +1,40 @@
+#!/bin/sh
+# Usage: scripts/pr-open [--title TITLE]
+# Push the current issue branch and open a PR against main that closes the issue.
+# If a PR for the branch is already open, push and print its URL.
+set -eu
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "$0")/lib.sh"
+
+title=
+while [ $# -gt 0 ]; do
+	case $1 in
+	--title)
+		[ $# -ge 2 ] || usage "--title needs a value"
+		title=$2
+		shift 2
+		;;
+	*) usage "usage: pr-open [--title TITLE]" ;;
+	esac
+done
+need_repo
+branch=$(current_branch)
+n=$(issue_number "$branch") || usage "branch '$branch' is not named issue-<n>-<slug>"
+require_clean
+git fetch -q origin main
+
+[ "$(git rev-list --count origin/main..HEAD)" -gt 0 ] || die "no commits ahead of origin/main"
+git merge-base --is-ancestor origin/main HEAD ||
+	die "branch is behind origin/main; run scripts/worktree-sync first"
+
+git push -q --force-with-lease -u origin "$branch"
+
+url=$(gh pr list --head "$branch" --state open --json url -q '.[0].url')
+if [ -n "$url" ]; then
+	printf '%s: PR already open: %s\n' "$prog" "$url"
+	exit 0
+fi
+
+[ -n "$title" ] || title=$(gh issue view "$n" --json title -q .title) || die "could not read issue #$n"
+body=$(printf '%s\n\nCloses #%s\n' "$(git log --reverse --format='- %s' origin/main..HEAD)" "$n")
+gh pr create --base main --head "$branch" --title "$title" --body "$body"

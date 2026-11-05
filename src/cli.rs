@@ -56,8 +56,10 @@ pub enum Command {
         /// The session's initial label. Claude Code may rename the session later; rex-relay tracks
         /// it by id. Without a label, Rex picks one.
         label: Option<String>,
-        /// The directory the pane starts in, on the Rex host.
-        #[arg(long, value_name = "DIR")]
+        /// The directory the pane starts in, on the Rex host: an absolute path, `~`, or a path
+        /// under `~/`. The Rex host expands `~` to its own home directory, and `new` fails if the
+        /// directory doesn't exist there.
+        #[arg(long, value_name = "DIR", value_parser = parse_cwd)]
         cwd: Option<String>,
         /// The program to run and its arguments. Quote arguments as a shell would, such as
         /// --cmd "claude --append-system-prompt 'Be terse.'"; no shell runs it.
@@ -175,6 +177,15 @@ fn parse_program(text: &str) -> Result<Program, String> {
         Some(words) if !words.is_empty() => Ok(Program(words)),
         Some(_) => Err("the command is empty".into()),
         None => Err("the command has an unclosed quote or a trailing backslash".into()),
+    }
+}
+
+/// Accepts the forms the Rex host can resolve without a working directory to start from.
+fn parse_cwd(text: &str) -> Result<String, String> {
+    if text.starts_with('/') || text == "~" || text.starts_with("~/") {
+        Ok(text.to_owned())
+    } else {
+        Err("expected an absolute path, ~, or a path under ~/".into())
     }
 }
 

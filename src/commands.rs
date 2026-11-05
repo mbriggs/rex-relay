@@ -564,7 +564,9 @@ fn create(
     {
         return Err(Refusal(format!("a session labelled {label:?} already exists")).into());
     }
-    let created = rex.create(label, cwd, &cmd.0)?;
+    // Rex starts a pane in the home directory when its cwd doesn't exist, so check first.
+    let cwd = cwd.map(|cwd| rex.resolve_dir(cwd)).transpose()?;
+    let created = rex.create(label, cwd.as_deref(), &cmd.0)?;
     rex.close();
     entry.session = Some(created.session.to_string());
     // Record ownership before anything else can fail: an unrecorded session could never be

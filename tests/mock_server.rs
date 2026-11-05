@@ -576,8 +576,14 @@ fn handle(
             s.created.push(payload.clone());
             // Rex names a session itself when the request has no label.
             let label = payload["label"].as_str().unwrap_or("Session 2").to_owned();
-            s.sessions
-                .push(("session:new".into(), label, vec![claude(vec![])]));
+            s.sessions.push((
+                "session:new".into(),
+                label,
+                vec![Block {
+                    id: "block:new",
+                    ..claude(vec![])
+                }],
+            ));
             Ok(json!({"session_id": "session:new", "initial_windows": [
                 {"window_id": "window:new", "block_ids": ["block:new"], "revision": 1}]}))
         }
@@ -611,6 +617,21 @@ fn handle(
                         name = "make";
                     }
                     Ok(json!({"foreground": {"pid": 7, "user_id": 1000, "name": name}}))
+                }
+                ".list_dir" => {
+                    // The host's home is /home/me, and /srv/app and ~/x are its only directories.
+                    let asked = payload["args"]["path"].as_str().unwrap_or_default();
+                    let path = match asked.strip_prefix('~') {
+                        Some(rest) => format!("/home/me{rest}"),
+                        None => asked.to_owned(),
+                    };
+                    let status = if ["/srv/app", "/home/me/x"].contains(&path.as_str()) {
+                        "ok"
+                    } else {
+                        "missing"
+                    };
+                    Ok(json!({"path": path, "home": "/home/me", "status": status,
+                        "entries": [], "truncated": false}))
                 }
                 ".title" => Ok(json!({"title": ""})),
                 ".modes" => Ok(json!({"screen": "primary", "modes": [
@@ -1464,8 +1485,8 @@ fn new_creates_a_session_and_audits() {
     }
 
     let created = mock.state.lock().unwrap().created.clone();
-    assert_eq!(created[0]["label"], "fix-ci");
-    let block = &created[0]["initial_windows"][0]["layout"]["block"];
+    assert_eq!(created[1]["label"], "fix-ci");
+    let block = &created[1]["initial_windows"][0]["layout"]["block"];
     assert_eq!(block["flavor"], "com.superlogical.terminal.shell");
     assert_eq!(block["options"]["cwd"], "/srv/app");
     assert_eq!(
@@ -1484,7 +1505,11 @@ fn new_creates_a_session_and_audits() {
     assert_eq!(code(&bad), 3, "{bad:?}");
     let bad = mock.cli(&["new", "y", "--cmd", "claude 'unclosed"]);
     assert_eq!(code(&bad), 2, "{bad:?}");
-    assert_eq!(mock.state.lock().unwrap().created.len(), 1);
+    assert_eq!(
+        mock.state.lock().unwrap().created.len(),
+        2,
+        "a probe session, then fix-ci"
+    );
 
     // Sessions rex-relay created can be sent to and closed, whatever Claude Code renames them.
     mock.rename("session:new", "CI pipeline fix");
@@ -1507,7 +1532,7 @@ fn new_without_a_label_lets_rex_name_the_session() {
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(stdout(&output), "session:new\t\tblock:new\n");
     let created = mock.state.lock().unwrap().created.clone();
-    assert!(created[0].get("label").is_none(), "{created:?}");
+    assert!(created[1].get("label").is_none(), "{created:?}");
     let owned = mock
         .registry()
         .find(&mock.canonical_endpoint(), &"session:new".into())
@@ -1524,6 +1549,77 @@ fn new_without_a_label_lets_rex_name_the_session() {
         .unwrap();
     assert!(entry.get("label").is_none(), "{entry}");
     assert!(mock.audit()[0].get("session_label").is_none());
+}
+
+/// The cwd `new` asked Rex to start its pane in, if it created one.
+fn started_in(mock: &Mock) -> Option<Value> {
+    let created = mock.state.lock().unwrap().created.clone();
+    let real = created
+        .iter()
+        .find(|c| c["label"] != "rex-relay cwd check")?;
+    Some(real["initial_windows"][0]["layout"]["block"]["options"]["cwd"].clone())
+}
+
+#[test]
+fn new_expands_a_tilde_cwd_on_the_rex_host() {
+    let mock = demo(vec![], AfterEnter::Done);
+    let output = mock.cli(&["new", "--cwd", "~/x"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(started_in(&mock), Some(json!("/home/me/x")));
+    // The probe session is closed; only the new one remains.
+    let methods = mock.methods();
+    assert!(methods.contains(&"com.superlogical.terminal.list_dir".to_owned()));
+    assert!(methods.contains(&"session.destroy".to_owned()));
+    let ids: Vec<String> = mock
+        .state
+        .lock()
+        .unwrap()
+        .sessions
+        .iter()
+        .map(|s| s.0.clone())
+        .collect();
+    assert_eq!(ids, [SID, FOREIGN, "session:new"]);
+}
+
+#[test]
+fn new_passes_an_absolute_cwd_through() {
+    let mock = demo(vec![], AfterEnter::Done);
+    let output = mock.cli(&["new", "--cwd", "/srv/app"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(started_in(&mock), Some(json!("/srv/app")));
+}
+
+#[test]
+fn new_refuses_a_cwd_missing_on_the_rex_host() {
+    let mock = demo(vec![], AfterEnter::Done);
+    let output = mock.cli(&["new", "--cwd", "~/src/missing"]);
+    assert_eq!(code(&output), 1, "{output:?}");
+    assert!(
+        stderr(&output).contains("/home/me/src/missing doesn't exist on the Rex host"),
+        "{output:?}"
+    );
+    assert_eq!(started_in(&mock), None);
+    assert_eq!(mock.owned_ids(), [SID]);
+    let ids: Vec<String> = mock
+        .state
+        .lock()
+        .unwrap()
+        .sessions
+        .iter()
+        .map(|s| s.0.clone())
+        .collect();
+    assert_eq!(ids, [SID, FOREIGN]);
+    assert!(
+        mock.audit()[0]["result"]
+            .as_str()
+            .unwrap()
+            .contains("doesn't exist")
+    );
+
+    for bad in ["src/app", "~other/src"] {
+        let output = mock.cli(&["new", "--cwd", bad]);
+        assert_eq!(code(&output), 2, "{bad}: {output:?}");
+    }
 }
 
 #[test]
