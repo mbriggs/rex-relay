@@ -23,7 +23,7 @@ that matches two sessions exits 2 and lists their ids.
 | --- | --- |
 | `rex-relay tree [session]` | See sessions, tabs, panes, what runs in each, and each pane's status. |
 | `rex-relay list` | See sessions. `*` marks the ones you created, which `send` and `run` accept. |
-| `rex-relay status <target>` | Check whether Claude Code is working, done, or waiting on a person. |
+| `rex-relay status <target>` | Check whether Claude Code is working, done, or waiting on a person. `Background (N shells)` means the turn ended but shells it started still run, so the work isn't finished. |
 | `rex-relay read <target> --lines N` | Read the last lines of a pane. |
 | `rex-relay new [label] --cwd DIR --purpose TEXT --wait-ready` | Start a Claude Code session you own. Keep the session id it prints. `DIR` is a path on the Rex host; quote `~/...` so the Rex host expands it, not your shell. `--wait-ready` returns once `send` would be accepted; it exits 10 on a startup dialog and 15 if the prompt never shows. |
 | `rex-relay send <target> "<task>"` | Hand Claude Code a task, then wait until it stops. |
@@ -66,7 +66,7 @@ and `wait` exits 10 with the dialog's text.
 | 12 | Needs input, of an unknown kind. | Same as 10. |
 | 13 | Needs sign-in. | Same as 10. |
 | 14 | Claude Code reported an error. | `rex-relay read` the pane and report it. |
-| 15 | Timeout: still working. | `rex-relay wait <target>` to keep waiting. |
+| 15 | Timeout: still working, or `last_status` is `background` because shells still run. | `rex-relay wait <target>` to keep waiting. |
 | 16 | Lost connection: the Rex server stayed unreachable for about a minute. | Once it's back, `rex-relay status`, then `wait`. |
 
 After exit 15, the message was typed once. Keep following the task with `wait`, because sending
