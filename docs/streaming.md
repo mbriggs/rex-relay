@@ -262,3 +262,32 @@ into a scratch session, started `claude --resume <id>` in another, renamed a Rex
 `rex session rename`, and raised one real permission prompt (`touch` in `--permission-mode
 default`), declined with Esc. The scratch sessions left two transcripts in
 `~/.claude/projects/-Users-mbriggs-src-rex-relay/`: `264027bc-…` and the approval probe's.
+
+## Prototype findings: `client.perform` round trip
+
+Tried 2026-11-05 against the live Rex server on control API revision 8, with both processes on
+the Rex host over the Unix socket. `rex-relay host --prototype` connects with the label
+`rex-relay-host` and answers `relay.ping`. `rex-relay debug perform <client> <action> [args]`
+finds the client in `client.list` by id or label and calls `client.perform`. Both commands are
+hidden.
+
+- **The round trip works.** The daemon declares no actions and is asked anyway, as the API docs
+  say. `relay.ping` came back with its args and the caller's `client_id` and `principal`.
+- **The principal arrives in the event.** `client_perform_requested` carries
+  `requester.principal`, so the daemon doesn't need its own `client.list` call to check a
+  caller. A local caller showed `kind: "peer"`, `transport: "unix"`, `uid`, `gid`, and `pid`.
+  A caller on the tailnet wasn't tried. The unit tests decode a `tailscale` principal with tags.
+- **The daemon receives requests without attaching.** A connection that attached to nothing
+  still gets `client_perform_requested`.
+- **Errors come back with their codes.** An action the daemon answers with `not_supported`
+  reaches the caller as `not supported: <message>`. A client that isn't connected is caught
+  before the call, by its absence from `client.list`.
+- **A timeout leaves a late reply behind.** With the daemon stopped (`SIGSTOP`), a 2-second
+  `timeout_ms` failed after 2 seconds with `timeout`. When the daemon resumed, it answered the
+  stale request, and `client.reply` failed with `not_found`. The first prototype exited on that
+  error. It now notes the error and keeps serving, and later pings succeed. A real daemon has to
+  expect this whenever it is slower than the caller's timeout.
+- **The caller's read timeout must cover `timeout_ms`.** The server answers `client.perform`
+  only after the other client has, so the caller's socket read timeout is raised to the perform
+  timeout plus `call_timeout` for that call. `debug perform` refuses a `--timeout` over 30s,
+  the server's cap, and defaults to 10s.

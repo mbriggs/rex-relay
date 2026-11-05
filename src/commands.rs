@@ -7,11 +7,14 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::audit::{self, AuditLog, Entry};
-use crate::cli::{Cli, Command, Program, RunArgs, SendArgs, Target, WaitArgs, WaitOptions};
+use crate::cli::{
+    Cli, Command, DebugCommand, Program, RunArgs, SendArgs, Target, WaitArgs, WaitOptions,
+};
 use crate::config::{self, Config};
 use crate::endpoint::Endpoint;
 use crate::exit;
 use crate::guard::{self, Refusal};
+use crate::host;
 use crate::ids::{BlockId, SessionId};
 use crate::output::{DEFAULT_HOLDBACK, Pump};
 use crate::pane::{self, Evidence, Pane, Scope};
@@ -193,7 +196,44 @@ fn execute(cli: &Cli, out: &Out) -> Result<i32> {
         Command::Wait(args) => wait(&ctx, out, args),
         Command::Run(args) => run_shell(&ctx, out, args),
         Command::Close { session } => close(&ctx, out, session),
+        Command::Host { .. } => host(&ctx),
+        Command::Debug(DebugCommand::Perform {
+            client,
+            action,
+            args,
+            timeout,
+        }) => debug_perform(&ctx, out, client, action, args, *timeout),
     }
+}
+
+/// Runs the prototype host daemon until its connection fails.
+fn host(ctx: &Ctx) -> Result<i32> {
+    let mut rex =
+        Rex::connect_labelled(&ctx.endpoint, ctx.config.call_timeout(), host::HOST_LABEL)?;
+    eprintln!(
+        "rex-relay host: connected to {} as {}; answering {}",
+        ctx.endpoint,
+        host::HOST_LABEL,
+        host::PING
+    );
+    host::serve(&mut rex)?;
+    Ok(exit::OK)
+}
+
+fn debug_perform(
+    ctx: &Ctx,
+    out: &Out,
+    client: &str,
+    action: &str,
+    args: &str,
+    timeout: Duration,
+) -> Result<i32> {
+    let args = serde_json::from_str(args).context("parsing the action's args")?;
+    let mut rex = ctx.connect()?;
+    let result = rex.perform(client, action, args, timeout)?;
+    rex.close();
+    out.line(&serde_json::to_string_pretty(&result)?);
+    Ok(exit::OK)
 }
 
 /// A session and the pane the relay acts on in it.

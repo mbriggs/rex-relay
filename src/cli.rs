@@ -81,6 +81,34 @@ pub enum Command {
         /// The session's id (session:…) or label, current or from `new`.
         session: String,
     },
+    /// Experimental: run the host daemon, which answers other rex-relay processes through
+    /// `client.perform`. Only `--prototype` exists yet, and it answers only `relay.ping`.
+    #[command(hide = true)]
+    Host {
+        /// Run the prototype. Required while the daemon is a prototype.
+        #[arg(long, required = true)]
+        prototype: bool,
+    },
+    /// Experimental commands for trying out the host daemon.
+    #[command(hide = true, subcommand)]
+    Debug(DebugCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DebugCommand {
+    /// Ask a connected client to perform an action, and print what it returns.
+    Perform {
+        /// The client's id or label, such as rex-relay-host.
+        client: String,
+        /// The action, such as relay.ping.
+        action: String,
+        /// The action's args, as a JSON object.
+        #[arg(default_value = "{}")]
+        args: String,
+        /// How long to wait for the client's answer, at most 30s.
+        #[arg(long, value_parser = crate::host::parse_perform_timeout, default_value = "10s", value_name = "DURATION")]
+        timeout: Duration,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
