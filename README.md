@@ -135,9 +135,9 @@ lists the matching ids; use one of them.
 | --- | --- |
 | `rex-relay list` | Lists sessions. `*` (or `"owned": true`) marks sessions rex-relay created, followed by their purpose. A renamed session shows `(created as LABEL)` after its current label. |
 | `rex-relay tree [session]` | Shows each session's tabs and terminal panes: numbers, labels, ids, the program in each pane, and its OSC 7501 status. |
-| `rex-relay status <target> [--block ID]` | Shows the Claude Code pane's status and message. |
+| `rex-relay status <target> [--block ID]` | Shows the Claude Code pane's status, permission mode, and message. |
 | `rex-relay read <target> [--lines N] [--block ID]` | Prints the pane's last N lines (default 100; 0 for all). |
-| `rex-relay new [label] [--cwd DIR] [--cmd claude] [--purpose TEXT] [--wait-ready [--timeout D]]` | Creates a session with the initial label `label` (or one Rex picks), whose one pane runs `--cmd` (default `claude`, with arguments quoted as in a shell, though no shell runs it) in `--cwd`, and records it in the ownership registry. `--cwd` is an absolute path, `~`, or a path under `~/`; the Rex host expands `~` to its own home directory. `new` fails if the directory doesn't exist on the Rex host. To check, it opens a session labelled `rex-relay cwd check` and closes it again. With `--wait-ready`, `new` prints the ids, then waits until Claude Code is at its input prompt, where `send` would type, and exits 0. If Claude Code shows a dialog first, such as folder trust, it exits with that status's code (10 for a dialog) and prints the dialog's text. If the prompt doesn't appear within `--timeout` (default: the config's `timeout`, or 30m), it prints the pane's last 20 lines and exits 15. |
+| `rex-relay new [label] [--cwd DIR] [--cmd claude | --auto] [--purpose TEXT] [--wait-ready [--timeout D]]` | Creates a session with the initial label `label` (or one Rex picks), whose one pane runs `--cmd` (default `claude`, with arguments quoted as in a shell, though no shell runs it) in `--cwd`, and records it in the ownership registry. `--cwd` is an absolute path, `~`, or a path under `~/`; the Rex host expands `~` to its own home directory. `new` fails if the directory doesn't exist on the Rex host. To check, it opens a session labelled `rex-relay cwd check` and closes it again. `--auto` runs `claude --permission-mode auto` and can't be combined with `--cmd`. With `--wait-ready`, `new` prints the ids, then waits until Claude Code is at its input prompt, where `send` would type, and exits 0. If Claude Code shows a dialog first, such as folder trust, it exits with that status's code (10 for a dialog) and prints the dialog's text. If the prompt doesn't appear within `--timeout` (default: the config's `timeout`, or 30m), it prints the pane's last 20 lines and exits 15. |
 | `rex-relay send <target> "msg"` | Pastes the message into the Claude Code pane, presses Enter once, then streams the pane's new output until Claude Code stops. Owned sessions only, unless `--allow-foreign`. |
 | `rex-relay run <target> -- <command>` | Types a command line into a shell pane that is idle at its prompt, presses Enter, and streams the new output until the prompt returns. Owned sessions only, unless `--allow-foreign`. See [Running shell commands](#running-shell-commands). |
 | `rex-relay wait <target>` | Streams the pane's new output until Claude Code stops working. Returns at once if it isn't working. |
@@ -215,6 +215,13 @@ dialog, Claude Code still starting, or a pane that doesn't run Claude Code.
 Claude Code reports no status for its folder-trust dialog, so `status` and `wait` read the screen
 when the pane is Idle. A menu there is a Dialog: `status` shows the folder it asks about, and
 `wait` exits 10 and prints the dialog's text.
+
+`status` and `tree` also read Claude Code's permission mode from the footer under its prompt,
+such as `⏵⏵ auto mode on (shift+tab to cycle)`. The mode is `default` when the footer names
+none, one of `acceptEdits`, `plan`, `auto`, `dontAsk`, or `bypassPermissions` when it does, and
+`unknown` when the prompt isn't on screen, such as during a permission request. Text output
+shows it in brackets after the status (`Working [auto]`); JSON output has it as `mode`, which
+`tree` sets to `null` for panes that don't run Claude Code.
 
 The message is written as one bracketed paste (`ESC[200~ … ESC[201~`), so newlines stay inside
 the message, followed after a short pause by a single carriage return (Enter).

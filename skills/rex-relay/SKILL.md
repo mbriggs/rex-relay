@@ -23,9 +23,9 @@ that matches two sessions exits 2 and lists their ids.
 | --- | --- |
 | `rex-relay tree [session]` | See sessions, tabs, panes, what runs in each, and each pane's status. |
 | `rex-relay list` | See sessions. `*` marks the ones you created, which `send` and `run` accept. |
-| `rex-relay status <target>` | Check whether Claude Code is working, done, or waiting on a person. `Background (N shells)` means the turn ended but shells it started still run, so the work isn't finished. |
+| `rex-relay status <target>` | Check whether Claude Code is working, done, or waiting on a person, and its permission mode (`[auto]`, `[default]`, …; `[unknown]` when the prompt isn't on screen). `Background (N shells)` means the turn ended but shells it started still run, so the work isn't finished. |
 | `rex-relay read <target> --lines N` | Read the last lines of a pane. |
-| `rex-relay new [label] --cwd DIR --purpose TEXT --wait-ready` | Start a Claude Code session you own. Keep the session id it prints. `DIR` is a path on the Rex host; quote `~/...` so the Rex host expands it, not your shell. `--wait-ready` returns once `send` would be accepted; it exits 10 on a startup dialog and 15 if the prompt never shows. |
+| `rex-relay new [label] --cwd DIR --purpose TEXT [--auto] --wait-ready` | Start a Claude Code session you own; `--auto` starts it in auto permission mode. Keep the session id it prints. `DIR` is a path on the Rex host; quote `~/...` so the Rex host expands it, not your shell. `--wait-ready` returns once `send` would be accepted; it exits 10 on a startup dialog and 15 if the prompt never shows. |
 | `rex-relay send <target> "<task>"` | Hand Claude Code a task, then wait until it stops. |
 | `rex-relay wait <target>` | Keep waiting on a pane that is still working, without typing anything. |
 | `rex-relay run <target> -- '<command line>'` | Run one shell command in a shell pane idle at its prompt. |
