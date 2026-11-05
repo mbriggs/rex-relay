@@ -110,14 +110,19 @@ command runs. Claude Code renames the sessions it runs in, so the label you crea
 may no longer work; the id always does. A label that matches more than one session is an error
 (exit 1); use the id.
 
+`<target>` is a session, optionally followed by a tab and a pane: `session`, `session:tab`, or
+`session:tab:pane`. For example, `solar-creek:shell` or `solar-creek:1:2`. See
+[Which pane](#which-pane).
+
 | Command | What it does |
 | --- | --- |
 | `rexctl list` | Lists sessions. `*` (or `"owned": true`) marks sessions rexctl created, followed by their purpose. |
-| `rexctl status <session> [--block ID]` | Shows the Claude Code pane's status and message. |
-| `rexctl read <session> [--lines N] [--block ID]` | Prints the pane's last N lines (default 100; 0 for all). |
+| `rexctl tree [session]` | Shows each session's tabs and terminal panes: numbers, labels, ids, the program in each pane, and its OSC 7501 status. |
+| `rexctl status <target> [--block ID]` | Shows the Claude Code pane's status and message. |
+| `rexctl read <target> [--lines N] [--block ID]` | Prints the pane's last N lines (default 100; 0 for all). |
 | `rexctl new [label] [--cwd DIR] [--cmd claude] [--purpose TEXT]` | Creates a session with the initial label `label` (or one Rex picks), whose one pane runs `--cmd` (default `claude`, with arguments quoted as in a shell, though no shell runs it) in `--cwd`, and records it in the ownership registry. |
-| `rexctl send <session> "msg"` | Pastes the message into the Claude Code pane, presses Enter once, then streams the pane's new output until Claude Code stops. Owned sessions only, unless `--allow-foreign`. |
-| `rexctl wait <session>` | Streams the pane's new output until Claude Code stops working. Returns at once if it isn't working. |
+| `rexctl send <target> "msg"` | Pastes the message into the Claude Code pane, presses Enter once, then streams the pane's new output until Claude Code stops. Owned sessions only, unless `--allow-foreign`. |
+| `rexctl wait <target>` | Streams the pane's new output until Claude Code stops working. Returns at once if it isn't working. |
 | `rexctl close <session>` | Closes a session rexctl created, and removes it from the registry. There is no override: other sessions are never closed. |
 
 ### Ownership registry
@@ -151,6 +156,19 @@ longer has removes it from the registry without sending anything.
 `send` also takes `--answer`, `--allow-foreign`, `--max-bytes N`, and `--block ID`.
 
 ### Which pane
+
+A target can name a tab and a pane after its session. Rex calls tabs windows and panes blocks.
+`rexctl tree` shows the names and numbers.
+
+- A tab matches by label, window id, or number, counting from 1.
+- A pane matches by label, block id (with or without `block:`), or number within its tab.
+- In `session:name`, `name` is a tab if one matches. Otherwise it names panes by label anywhere
+  in the session, so `solar-creek:shell` finds the panes labeled `shell`.
+- The whole target is tried as a session id or label first, because both can contain colons.
+
+If the target names exactly one pane, `rexctl` uses it, whatever runs in it. Ownership is still
+checked for its session. If the target names a whole session, a tab, or several panes,
+`rexctl` picks among them as follows.
 
 A session can have several terminal panes. `rexctl` uses the one whose program is Claude Code,
 recognised by its OSC 7501 status records (`app`/`effective_app` = `claude`), its foreground

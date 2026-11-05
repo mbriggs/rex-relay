@@ -528,12 +528,13 @@ fn handle(
         let blocks: Vec<Value> = session
             .2
             .iter()
-            .map(|b| json!({"block_id": b.id, "creator_name": TERMINAL, "flavor": "com.superlogical.terminal.shell"}))
+            .map(|b| json!({"block_id": b.id, "creator_name": TERMINAL, "flavor": "com.superlogical.terminal.shell",
+                "label": if b.foreground == "claude" { "claude" } else { "shell" }}))
             .collect();
         json!({
             "revision": 1, "session_id": session.0, "label": session.1,
             "active_window_id": "window:1",
-            "windows": [{"window_id": "window:1", "focused_block_id": session.2.last().map(|b| b.id),
+            "windows": [{"window_id": "window:1", "label": "main", "focused_block_id": session.2.last().map(|b| b.id),
                 "layers": [{"kind": "tiled", "blocks": blocks}]}],
         })
     };
@@ -1423,6 +1424,92 @@ fn list_status_and_read() {
     let output = mock.rexctl(&["read", "demo", "--lines", "2"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(stdout(&output), format!("{}\n{}\n", BOX[2], BOX[3]));
+}
+
+#[test]
+fn tree_shows_tabs_panes_and_status() {
+    let mock = demo(
+        vec![record("working", None, Some("Editing files"))],
+        AfterEnter::Done,
+    );
+    let output = mock.rexctl(&["--json", "tree"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    let sessions = json_lines(&output);
+    assert_eq!(sessions.len(), 2);
+    let demo = &sessions[0];
+    assert_eq!(demo["label"], "demo");
+    assert_eq!(demo["owned"], true);
+    let tab = &demo["tabs"][0];
+    assert_eq!(
+        (tab["tab"].clone(), tab["label"].clone()),
+        (json!(1), json!("main"))
+    );
+    let panes = tab["panes"].as_array().unwrap();
+    assert_eq!(panes[0]["label"], "shell");
+    assert_eq!(panes[0]["program"], "bash");
+    assert_eq!(panes[0]["status"], Value::Null);
+    assert_eq!(panes[1]["pane"], 2);
+    assert_eq!(panes[1]["claude"], true);
+    assert_eq!(panes[1]["status"], "working");
+    assert_eq!(panes[1]["msg"], "Editing files");
+
+    let output = mock.rexctl(&["tree", "demo"]);
+    let text = stdout(&output);
+    assert!(
+        text.starts_with(&format!("* demo  {SID}  (demo the relay)\n")),
+        "{text}"
+    );
+    assert!(text.contains("    1  main  window:1  [active]\n"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "        1:2  claude  {}  claude  Working: Editing files  [focused]",
+            claude(vec![]).id
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("work"), "only the named session: {text}");
+}
+
+#[test]
+fn targets_name_tabs_and_panes() {
+    let mock = demo(vec![record("done", None, None)], AfterEnter::Done);
+    let block_of = |target: &str| {
+        let output = mock.rexctl(&["--json", "status", target]);
+        assert_eq!(code(&output), 0, "{target}: {output:?}");
+        json_lines(&output)[0]["block_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (shell_id, claude_id) = (shell().id, claude(vec![]).id);
+    // A named pane is used as given, even when it isn't Claude Code.
+    assert_eq!(block_of("demo:shell"), shell_id);
+    assert_eq!(block_of("demo:main:shell"), shell_id);
+    assert_eq!(block_of("demo:1:1"), shell_id);
+    // A tab or a whole session picks its Claude Code pane.
+    assert_eq!(block_of("demo:main"), claude_id);
+    assert_eq!(block_of("demo:1"), claude_id);
+    assert_eq!(block_of(&format!("{SID}:1:2")), claude_id);
+    assert_eq!(block_of("demo"), claude_id);
+
+    let output = mock.rexctl(&["status", "demo:nowhere"]);
+    assert_eq!(code(&output), 1, "{output:?}");
+    assert!(
+        stderr(&output).contains("no tab or terminal pane"),
+        "{output:?}"
+    );
+
+    // Ownership is still per session: a pane in a foreign session is refused.
+    let output = mock.rexctl(&["send", "work:main:claude", "hi"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(stderr(&output).contains("--allow-foreign"), "{output:?}");
+    // The named shell pane isn't at Claude Code's prompt, so send refuses it.
+    let output = mock.rexctl(&["send", "demo:shell", "hi"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(mock.writes().is_empty());
+    let output = mock.rexctl(&["send", "demo:claude", "hi", "--quiet"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert!(mock.writes().iter().all(|w| w.1 == claude_id));
 }
 
 #[test]

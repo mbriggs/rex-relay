@@ -10,6 +10,7 @@ use rexrs::{ClientKind, Event, RexClient};
 
 use crate::endpoint::Endpoint;
 use crate::ids::{BlockId, SessionId};
+use crate::pane::Scope;
 use crate::status::Records;
 use crate::transport::{self, Transport};
 
@@ -102,16 +103,23 @@ impl Rex {
 
     /// The session with this id, or else the only one with this label.
     pub fn resolve(&mut self, wanted: &str) -> Result<Session> {
+        match find_session(&self.sessions()?, wanted)? {
+            Some(session) => Ok(session),
+            None => bail!("no session with id or label {wanted:?}"),
+        }
+    }
+
+    /// The session a target names, and the tab and pane after it: `session`, `session:tab`,
+    /// or `session:tab:pane`. Session ids and labels can hold colons, so the whole target is
+    /// tried as a session first, then the parts after its last one or two colons.
+    pub fn resolve_target(&mut self, target: &str) -> Result<(Session, Scope)> {
         let sessions = self.sessions()?;
-        if let Some(s) = sessions.iter().find(|s| s.id.as_str() == wanted) {
-            return Ok(s.clone());
+        for (name, scope) in interpretations(target) {
+            if let Some(session) = find_session(&sessions, name)? {
+                return Ok((session, scope));
+            }
         }
-        let labelled: Vec<_> = sessions.iter().filter(|s| s.label == wanted).collect();
-        match labelled.as_slice() {
-            [one] => Ok((*one).clone()),
-            [] => bail!("no session with id or label {wanted:?}"),
-            _ => bail!("more than one session is labelled {wanted:?}; use its session id"),
-        }
+        bail!("no session with id or label {target:?}")
     }
 
     /// Lets this connection call methods on every session without joining any.
@@ -294,6 +302,50 @@ impl Rex {
     }
 }
 
+/// The session with this id, or else the only one with this label.
+fn find_session(sessions: &[Session], wanted: &str) -> Result<Option<Session>> {
+    if let Some(s) = sessions.iter().find(|s| s.id.as_str() == wanted) {
+        return Ok(Some(s.clone()));
+    }
+    let labelled: Vec<_> = sessions.iter().filter(|s| s.label == wanted).collect();
+    match labelled.as_slice() {
+        [one] => Ok(Some((*one).clone())),
+        [] => Ok(None),
+        _ => bail!("more than one session is labelled {wanted:?}; use its session id"),
+    }
+}
+
+/// The ways to read a target, most literal first: all session; session and tab; session, tab,
+/// and pane.
+fn interpretations(target: &str) -> Vec<(&str, Scope)> {
+    let mut out = vec![(target, Scope::default())];
+    let split = |text: &str| {
+        text.rsplit_once(':')
+            .filter(|(head, tail)| !head.is_empty() && !tail.is_empty())
+            .map(|(head, tail)| (head.to_owned(), tail.to_owned()))
+    };
+    if let Some((head, last)) = split(target) {
+        let session = &target[..head.len()];
+        out.push((
+            session,
+            Scope {
+                tab: Some(last.clone()),
+                pane: None,
+            },
+        ));
+        if let Some((first, tab)) = split(session) {
+            out.push((
+                &target[..first.len()],
+                Scope {
+                    tab: Some(tab),
+                    pane: Some(last),
+                },
+            ));
+        }
+    }
+    out
+}
+
 /// The WebSocket close code a server sends when it refuses the client, such as for sharing no
 /// API revision with it. Retrying can't change the answer.
 const POLICY_VIOLATION: u16 = 1008;
@@ -345,6 +397,34 @@ impl std::error::Error for Unreachable {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn targets_read_whole_first_then_split_from_the_right() {
+        let read = |t| -> Vec<(String, Option<String>, Option<String>)> {
+            interpretations(t)
+                .into_iter()
+                .map(|(s, scope)| (s.to_owned(), scope.tab, scope.pane))
+                .collect()
+        };
+        let o = |s: &str| Some(s.to_owned());
+        assert_eq!(read("work"), [("work".into(), None, None)]);
+        assert_eq!(
+            read("solar-creek:shell"),
+            [
+                ("solar-creek:shell".into(), None, None),
+                ("solar-creek".into(), o("shell"), None),
+            ]
+        );
+        assert_eq!(
+            read("session:01a1:2:1"),
+            [
+                ("session:01a1:2:1".into(), None, None),
+                ("session:01a1:2".into(), o("1"), None),
+                ("session:01a1".into(), o("2"), o("1")),
+            ]
+        );
+        assert_eq!(read("trailing:").len(), 1);
+    }
 
     #[test]
     fn backoff_doubles_up_to_8s() {

@@ -36,6 +36,11 @@ pub struct Cli {
 pub enum Command {
     /// List the server's sessions, marking the ones rexctl created.
     List,
+    /// Show sessions, their tabs, and their panes, with what runs in each pane and its status.
+    Tree {
+        /// Only this session: its id or current label.
+        session: Option<String>,
+    },
     /// Show the status of a session's Claude Code pane.
     Status(Target),
     /// Print the last lines of a session's Claude Code pane.
@@ -75,8 +80,11 @@ pub enum Command {
 
 #[derive(Debug, Clone, Args)]
 pub struct Target {
-    /// The session's id (session:…) or current label.
-    pub session: String,
+    /// The session, by id (session:…) or current label, optionally followed by a tab and a
+    /// pane: session:tab or session:tab:pane, such as solar-creek:shell. Tabs and panes match
+    /// by label, id, or number; see `rexctl tree`.
+    #[arg(value_name = "TARGET")]
+    pub name: String,
     /// The block to use instead of the one that runs Claude Code: its id, or a unique prefix.
     #[arg(long, value_name = "ID")]
     pub block: Option<String>,

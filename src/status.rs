@@ -218,6 +218,10 @@ impl Records {
         self.top().and_then(|r| r.msg.as_deref())
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn apps(&self) -> impl Iterator<Item = &str> {
         self.0.values().filter_map(|r| r.app.as_deref())
     }

@@ -14,7 +14,7 @@ use crate::exit;
 use crate::guard::{self, Refusal};
 use crate::ids::{BlockId, SessionId};
 use crate::output::{DEFAULT_HOLDBACK, Pump};
-use crate::pane::{self, Evidence, Pane};
+use crate::pane::{self, Evidence, Pane, Scope};
 use crate::prompt;
 use crate::registry::{Owned, Registry};
 use crate::rex::{self, Rex, Session, Unreachable};
@@ -165,6 +165,7 @@ fn execute(cli: &Cli, out: &Out) -> Result<i32> {
     };
     match &cli.command {
         Command::List => list(&ctx, out),
+        Command::Tree { session } => tree(&ctx, out, session.as_deref()),
         Command::Status(target) => show_status(&ctx, out, target),
         Command::Read { target, lines } => read(&ctx, out, target, *lines),
         Command::New {
@@ -193,9 +194,33 @@ struct Located {
     evidence: Evidence,
 }
 
-/// Finds the target pane in a resolved session. `attach` joins the session (for its events);
-/// otherwise the connection only observes.
-fn locate(rex: &mut Rex, session: Session, target: &Target, attach: bool) -> Result<Located> {
+/// Picks one pane among candidates, by what runs in them.
+type Chooser = fn(&[(Pane, Evidence)]) -> Result<&(Pane, Evidence)>;
+
+/// What a pane says about its program. A pane that can't answer one of these simply offers no
+/// evidence.
+fn gather(rex: &mut Rex, sid: &SessionId, pane: &Pane) -> Evidence {
+    Evidence {
+        records: rex
+            .program_status(sid, &pane.block_id)
+            .map(|r| r.1)
+            .unwrap_or_default(),
+        process: rex.process(sid, &pane.block_id).ok(),
+        title: rex.title(sid, &pane.block_id).ok(),
+    }
+}
+
+/// Finds the target pane in a resolved session: the panes `scope` names, narrowed by `block`,
+/// or else picked by `choose`. `attach` joins the session (for its events); otherwise the
+/// connection only observes.
+fn locate(
+    rex: &mut Rex,
+    session: Session,
+    scope: &Scope,
+    block: Option<&str>,
+    attach: bool,
+    choose: Chooser,
+) -> Result<Located> {
     let view = if attach {
         rex.attach(&session.id)?.1
     } else {
@@ -203,37 +228,163 @@ fn locate(rex: &mut Rex, session: Session, target: &Target, attach: bool) -> Res
         rex.view(&session.id)?
     };
     let panes = pane::panes(&view);
+    let selection = pane::select(&panes, scope)?;
     let sid = session.id.clone();
-    // A pane that can't answer one of these simply offers no evidence.
-    let mut gather = |pane: &Pane| Evidence {
-        records: rex
-            .program_status(&sid, &pane.block_id)
-            .map(|r| r.1)
-            .unwrap_or_default(),
-        process: rex.process(&sid, &pane.block_id).ok(),
-        title: rex.title(&sid, &pane.block_id).ok(),
+    let given = match block {
+        Some(wanted) => Some(pane::find_block(&selection.panes, wanted)?.clone()),
+        None if selection.named && selection.panes.len() == 1 => Some(selection.panes[0].clone()),
+        None => None,
     };
-    if let Some(wanted) = &target.block {
-        let pane = pane::find_block(&panes, wanted)?.clone();
-        let evidence = gather(&pane);
+    if let Some(pane) = given {
+        let evidence = gather(rex, &sid, &pane);
         return Ok(Located {
             session,
             pane,
             evidence,
         });
     }
-    let candidates: Vec<_> = panes
+    let candidates: Vec<_> = selection
+        .panes
         .into_iter()
         .map(|pane| {
-            let evidence = gather(&pane);
+            let evidence = gather(rex, &sid, &pane);
             (pane, evidence)
         })
         .collect();
-    let (pane, evidence) = pane::choose_claude(&candidates)?.clone();
+    let (pane, evidence) = choose(&candidates)?.clone();
     Ok(Located {
         session,
         pane,
         evidence,
+    })
+}
+
+/// Resolves a command's target to a session and the pane in it that `choose` picks.
+fn find(rex: &mut Rex, target: &Target, attach: bool, choose: Chooser) -> Result<Located> {
+    let (session, scope) = rex.resolve_target(&target.name)?;
+    locate(
+        rex,
+        session,
+        &scope,
+        target.block.as_deref(),
+        attach,
+        choose,
+    )
+}
+
+fn tree(ctx: &Ctx, out: &Out, only: Option<&str>) -> Result<i32> {
+    let mut rex = ctx.connect()?;
+    let sessions = match only {
+        Some(name) => vec![rex.resolve(name)?],
+        None => rex.sessions()?,
+    };
+    rex.observe_all()?;
+    let owned = ctx.registry.on(&ctx.endpoint_key())?;
+    for session in &sessions {
+        let view = rex.view(&session.id)?;
+        let panes: Vec<(Pane, Evidence)> = pane::panes(&view)
+            .into_iter()
+            .map(|pane| {
+                let evidence = gather(&mut rex, &session.id, &pane);
+                (pane, evidence)
+            })
+            .collect();
+        let mine = owned.iter().find(|o| o.session_id == session.id);
+        if out.json {
+            out.event(tree_json(session, mine, &panes));
+        } else {
+            print_tree(out, session, mine, &panes);
+        }
+    }
+    rex.close();
+    if !out.json && sessions.is_empty() {
+        out.note("no sessions");
+    }
+    Ok(exit::OK)
+}
+
+/// A pane's status for listings: its label and message, or nothing without status records.
+fn pane_status(evidence: &Evidence) -> Option<String> {
+    if evidence.records.is_empty() {
+        return None;
+    }
+    let status = evidence.records.status();
+    Some(match evidence.records.msg() {
+        Some(msg) => format!("{}: {msg}", status.label()),
+        None => status.label().to_owned(),
+    })
+}
+
+fn print_tree(out: &Out, session: &Session, mine: Option<&Owned>, panes: &[(Pane, Evidence)]) {
+    let mark = if mine.is_some() { "*" } else { " " };
+    let mut line = format!("{mark} {}  {}", session.label, session.id);
+    if let Some(purpose) = mine.and_then(|o| o.purpose.as_deref()) {
+        line.push_str(&format!("  ({purpose})"));
+    }
+    out.line(&line);
+    let mut tab = 0;
+    for (pane, evidence) in panes {
+        if pane.tab != tab {
+            tab = pane.tab;
+            let mut line = format!(
+                "    {tab}  {}  {}",
+                pane.window_label.as_deref().unwrap_or("-"),
+                pane.window_id.as_deref().unwrap_or("-")
+            );
+            if pane.tab_active {
+                line.push_str("  [active]");
+            }
+            out.line(&line);
+        }
+        let mut line = format!(
+            "        {tab}:{}  {}  {}  {}  {}",
+            pane.index,
+            pane.label.as_deref().unwrap_or("-"),
+            pane.block_id,
+            evidence.program().as_deref().unwrap_or("-"),
+            pane_status(evidence).as_deref().unwrap_or("-"),
+        );
+        if pane.focused {
+            line.push_str("  [focused]");
+        }
+        out.line(&line);
+    }
+}
+
+fn tree_json(session: &Session, mine: Option<&Owned>, panes: &[(Pane, Evidence)]) -> Value {
+    let mut tabs: Vec<Value> = Vec::new();
+    for (pane, evidence) in panes {
+        if tabs.len() < pane.tab {
+            tabs.push(json!({
+                "tab": pane.tab,
+                "window_id": pane.window_id,
+                "label": pane.window_label,
+                "active": pane.tab_active,
+                "panes": [],
+            }));
+        }
+        let status = (!evidence.records.is_empty()).then(|| evidence.records.status());
+        tabs[pane.tab - 1]["panes"]
+            .as_array_mut()
+            .expect("panes is an array")
+            .push(json!({
+                "pane": pane.index,
+                "block_id": pane.block_id,
+                "label": pane.label,
+                "focused": pane.focused,
+                "program": evidence.program(),
+                "claude": evidence.claude_reason().is_some(),
+                "status": status,
+                "msg": evidence.records.msg(),
+            }));
+    }
+    json!({
+        "type": "session",
+        "session_id": session.id,
+        "label": session.label,
+        "owned": mine.is_some(),
+        "purpose": mine.and_then(|o| o.purpose.as_deref()),
+        "tabs": tabs,
     })
 }
 
@@ -271,8 +422,7 @@ fn list(ctx: &Ctx, out: &Out) -> Result<i32> {
 
 fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
     let mut rex = ctx.connect()?;
-    let session = rex.resolve(&target.session)?;
-    let located = locate(&mut rex, session, target, false)?;
+    let located = find(&mut rex, target, false, pane::choose_claude)?;
     rex.close();
     let status = located.evidence.records.status();
     let msg = located.evidence.records.msg();
@@ -306,8 +456,7 @@ fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
 
 fn read(ctx: &Ctx, out: &Out, target: &Target, count: usize) -> Result<i32> {
     let mut rex = ctx.connect()?;
-    let session = rex.resolve(&target.session)?;
-    let located = locate(&mut rex, session, target, false)?;
+    let located = find(&mut rex, target, false, pane::choose_claude)?;
     let text = rex.read_text(&located.session.id, &located.pane.block_id)?;
     rex.close();
     let lines = last_lines(&text, count);
@@ -544,7 +693,7 @@ impl<'a> SendAttempt<'a> {
         }
         entry.session = Some(match &self.session {
             Some(session) => session.id.to_string(),
-            None => self.args.target.session.clone(),
+            None => self.args.target.name.clone(),
         });
         entry.session_label = self.session.as_ref().map(|s| s.label.clone());
         entry.block = self.block.as_ref().map(BlockId::to_string);
@@ -562,7 +711,7 @@ impl<'a> SendAttempt<'a> {
         let mut rex = ctx.connect()?;
         // The label is resolved now, as Claude Code may have renamed the session; ownership is
         // decided by its id alone, before the session is even attached.
-        let session = rex.resolve(&args.target.session)?;
+        let (session, scope) = rex.resolve_target(&args.target.name)?;
         self.session = Some(session.clone());
         let owned = ctx.owned(&session.id)?.is_some();
         guard::check_send_owned(
@@ -571,7 +720,14 @@ impl<'a> SendAttempt<'a> {
             &session.label,
             args.allow_foreign,
         )?;
-        let located = locate(&mut rex, session, &args.target, true)?;
+        let located = locate(
+            &mut rex,
+            session,
+            &scope,
+            args.target.block.as_deref(),
+            true,
+            pane::choose_claude,
+        )?;
         let (sid, bid) = (located.session.id, located.pane.block_id);
         self.block = Some(bid.clone());
 
@@ -661,8 +817,7 @@ fn clear_input(rex: &mut Rex, sid: &SessionId, bid: &BlockId) -> Result<()> {
 
 fn wait(ctx: &Ctx, out: &Out, args: &WaitArgs) -> Result<i32> {
     let mut rex = ctx.connect()?;
-    let session = rex.resolve(&args.target.session)?;
-    let located = locate(&mut rex, session, &args.target, true)?;
+    let located = find(&mut rex, &args.target, true, pane::choose_claude)?;
     let (sid, bid) = (located.session.id, located.pane.block_id);
     let (seq, records) = rex.program_status(&sid, &bid)?;
     let tracker = Tracker::waiting(records.status());

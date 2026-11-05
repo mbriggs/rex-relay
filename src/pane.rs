@@ -1,4 +1,7 @@
-//! Finding the terminal blocks of a session, and the one that runs Claude Code.
+//! Finding the terminal blocks of a session, by name or by what runs in them.
+//!
+//! Rex calls a session's tabs windows and its panes blocks. A target names a session, then
+//! optionally a tab and a pane: `solar-creek`, `solar-creek:shell`, `solar-creek:2:1`.
 
 use anyhow::{Result, bail};
 use rexrs::api::session::ViewResponse;
@@ -14,6 +17,12 @@ pub struct Pane {
     pub block_id: BlockId,
     pub window_id: Option<String>,
     pub window_label: Option<String>,
+    /// The window's position among the session's windows, from 1.
+    pub tab: usize,
+    /// The window is the session's active one.
+    pub tab_active: bool,
+    /// The pane's position among its window's terminal panes, from 1.
+    pub index: usize,
     pub label: Option<String>,
     /// The focused block of the session's active window.
     pub focused: bool,
@@ -22,8 +31,9 @@ pub struct Pane {
 /// Every terminal block in the view, in window and layout order.
 pub fn panes(view: &ViewResponse) -> Vec<Pane> {
     let mut panes = Vec::new();
-    for window in &view.windows {
+    for (tab, window) in view.windows.iter().enumerate() {
         let active = window.window_id.is_some() && window.window_id == view.active_window_id;
+        let mut index = 0;
         for layer in &window.layers {
             for block in &layer.blocks {
                 let Some(block_id) = block.block_id.as_deref() else {
@@ -38,10 +48,14 @@ pub fn panes(view: &ViewResponse) -> Vec<Pane> {
                     continue;
                 }
                 let focused = active && window.focused_block_id.as_deref() == Some(block_id);
+                index += 1;
                 panes.push(Pane {
                     block_id: block_id.into(),
                     window_id: window.window_id.clone(),
                     window_label: window.label.clone(),
+                    tab: tab + 1,
+                    tab_active: active,
+                    index,
                     label: block.label.clone(),
                     focused,
                 });
@@ -49,6 +63,103 @@ pub fn panes(view: &ViewResponse) -> Vec<Pane> {
         }
     }
     panes
+}
+
+/// The tab and pane a target names within its session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Scope {
+    pub tab: Option<String>,
+    pub pane: Option<String>,
+}
+
+/// The panes a scope selects.
+#[derive(Debug, Clone)]
+pub struct Selection {
+    pub panes: Vec<Pane>,
+    /// The scope named panes directly, rather than a whole tab or session. A single named pane
+    /// is used as given, like `--block`.
+    pub named: bool,
+}
+
+/// Selects the panes `scope` names. A tab matches by label, window id, or number. A pane
+/// matches by label, block id (with or without `block:`), or number within its tab. In
+/// `session:name`, `name` is a tab if one matches, and otherwise a pane anywhere in the session.
+pub fn select(panes: &[Pane], scope: &Scope) -> Result<Selection> {
+    let in_tab = |tab: usize| panes.iter().filter(move |p| p.tab == tab);
+    match (&scope.tab, &scope.pane) {
+        (None, _) => Ok(Selection {
+            panes: panes.to_vec(),
+            named: false,
+        }),
+        (Some(tab), Some(pane)) => {
+            let tab = only_tab(panes, tab)?.ok_or_else(|| anyhow::anyhow!("no tab {tab:?}"))?;
+            let matched: Vec<Pane> = in_tab(tab)
+                .filter(|p| names_pane(p, pane))
+                .cloned()
+                .collect();
+            if matched.is_empty() {
+                bail!("no terminal pane {pane:?} in tab {tab}");
+            }
+            Ok(Selection {
+                panes: matched,
+                named: true,
+            })
+        }
+        (Some(name), None) => {
+            if let Some(tab) = only_tab(panes, name)? {
+                return Ok(Selection {
+                    panes: in_tab(tab).cloned().collect(),
+                    named: false,
+                });
+            }
+            let matched: Vec<Pane> = panes
+                .iter()
+                .filter(|p| names_pane(p, name))
+                .cloned()
+                .collect();
+            if matched.is_empty() {
+                bail!("no tab or terminal pane {name:?} in this session");
+            }
+            Ok(Selection {
+                panes: matched,
+                named: true,
+            })
+        }
+    }
+}
+
+/// The number of the one tab `name` matches, if any.
+fn only_tab(panes: &[Pane], name: &str) -> Result<Option<usize>> {
+    let mut tabs: Vec<usize> = panes
+        .iter()
+        .filter(|p| {
+            p.window_label.as_deref() == Some(name)
+                || p.window_id
+                    .as_deref()
+                    .is_some_and(|id| id == name || id.strip_prefix("window:") == Some(name))
+        })
+        .map(|p| p.tab)
+        .collect();
+    tabs.dedup();
+    if tabs.is_empty()
+        && let Ok(n) = name.parse::<usize>()
+        && panes.iter().any(|p| p.tab == n)
+    {
+        tabs.push(n);
+    }
+    match tabs.as_slice() {
+        [] => Ok(None),
+        [tab] => Ok(Some(*tab)),
+        _ => bail!("more than one tab is named {name:?}; use its number or window id"),
+    }
+}
+
+fn names_pane(pane: &Pane, name: &str) -> bool {
+    let id = pane.block_id.as_str();
+    pane.label.as_deref() == Some(name)
+        || id == name
+        || id.strip_prefix("block:") == Some(name)
+        || name.parse::<usize>() == Ok(pane.index)
 }
 
 /// Whether a program name or path names Claude Code: the native `claude` binary, or the npm
@@ -196,6 +307,42 @@ mod tests {
     use rexrs::api::terminal::Child;
     use serde_json::json;
 
+    #[test]
+    fn selects_tabs_and_panes_by_name_or_number() {
+        let panes = panes(&view());
+        assert_eq!((panes[0].tab, panes[0].index), (1, 1));
+        assert_eq!((panes[1].tab, panes[1].index), (2, 1));
+        assert!(panes[1].tab_active);
+        let scope = |tab: Option<&str>, pane: Option<&str>| Scope {
+            tab: tab.map(Into::into),
+            pane: pane.map(Into::into),
+        };
+        let ids = |s: &Selection| -> Vec<String> {
+            s.panes.iter().map(|p| p.block_id.to_string()).collect()
+        };
+
+        let all = select(&panes, &Scope::default()).unwrap();
+        assert_eq!((all.panes.len(), all.named), (2, false));
+        // A tab by label, number, or window id.
+        for tab in ["editor", "2", "window:2", "2"] {
+            let s = select(&panes, &scope(Some(tab), None)).unwrap();
+            assert!(!s.named, "{tab}");
+            assert_eq!(ids(&s), ["block:abb"], "{tab}");
+        }
+        // With no such tab, a pane by label anywhere in the session.
+        let s = select(&panes, &scope(Some("claude"), None)).unwrap();
+        assert!(s.named);
+        assert_eq!(ids(&s), ["block:abb"]);
+        // A tab and a pane by label, number, or id.
+        for pane in ["claude", "1", "abb", "block:abb"] {
+            let s = select(&panes, &scope(Some("editor"), Some(pane))).unwrap();
+            assert_eq!(ids(&s), ["block:abb"], "{pane}");
+        }
+        assert!(select(&panes, &scope(Some("nope"), None)).is_err());
+        assert!(select(&panes, &scope(Some("editor"), Some("9"))).is_err());
+        assert!(select(&panes, &scope(Some("9"), Some("1"))).is_err());
+    }
+
     fn view() -> ViewResponse {
         serde_json::from_value(json!({
             "revision": 3,
@@ -208,7 +355,7 @@ mod tests {
                         {"block_id": "block:web", "creator_name": "com.example.browser"}
                     ]}
                 ]},
-                {"window_id": "window:2", "focused_block_id": "block:abb", "layers": [
+                {"window_id": "window:2", "label": "editor", "focused_block_id": "block:abb", "layers": [
                     {"kind": "tiled", "blocks": [
                         {"block_id": "block:abb", "flavor": "com.superlogical.terminal.shell", "label": "claude"}
                     ]}
