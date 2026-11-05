@@ -1,0 +1,990 @@
+//! End-to-end tests of `rexctl` against a scripted, in-process stand-in for a Rex server's
+//! control endpoint. Nothing here contacts a real server.
+
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::Output;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use rex_relay::registry::{Owned, Registry};
+use serde_json::{Value, json};
+use tungstenite::Message;
+use tungstenite::handshake::server::{ErrorResponse, Request, Response};
+
+const TERMINAL: &str = "com.superlogical.terminal";
+const BOX: [&str; 4] = [
+    "╭────────╮",
+    "│ >      │",
+    "╰────────╯",
+    "  ? for shortcuts",
+];
+
+/// What the fake Claude Code does once Enter arrives.
+#[derive(Clone, Copy, Debug)]
+enum AfterEnter {
+    Done,
+    Blocked(&'static str),
+    KeepWorking,
+}
+
+#[derive(Clone, Debug)]
+struct Block {
+    id: &'static str,
+    foreground: &'static str,
+    records: Vec<Value>,
+    bracketed_paste: bool,
+}
+
+struct State {
+    sessions: Vec<(String, String, Vec<Block>)>,
+    screen: Vec<String>,
+    after_enter: AfterEnter,
+    writes: Vec<(String, String, String)>,
+    created: Vec<Value>,
+    /// Every method called, in order.
+    methods: Vec<String>,
+}
+
+fn screen(body: &[&str]) -> Vec<String> {
+    body.iter()
+        .chain(&[""])
+        .chain(&BOX)
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn record(state: &str, kind: Option<&str>, msg: Option<&str>) -> Value {
+    let mut r = json!({"state": state, "app": "claude", "effective_app": "claude", "updated_at": "2026-11-04T00:00:00Z"});
+    if let Some(kind) = kind {
+        r["kind"] = json!(kind);
+    }
+    if let Some(msg) = msg {
+        r["msg"] = json!(msg);
+    }
+    r
+}
+
+fn claude(records: Vec<Value>) -> Block {
+    Block {
+        id: "block:c1a0de00-0000-0000-0000-000000000002",
+        foreground: "claude",
+        records,
+        bracketed_paste: true,
+    }
+}
+
+fn shell() -> Block {
+    Block {
+        id: "block:5he11000-0000-0000-0000-000000000001",
+        foreground: "bash",
+        records: vec![],
+        bracketed_paste: false,
+    }
+}
+
+struct Mock {
+    port: u16,
+    state: Arc<Mutex<State>>,
+    connections: Arc<AtomicUsize>,
+    dir: tempfile::TempDir,
+}
+
+impl Mock {
+    fn start(sessions: Vec<(&str, &str, Vec<Block>)>, after_enter: AfterEnter) -> Mock {
+        let state = Arc::new(Mutex::new(State {
+            sessions: sessions
+                .into_iter()
+                .map(|(id, label, blocks)| (id.to_owned(), label.to_owned(), blocks))
+                .collect(),
+            screen: screen(&["Welcome to Claude Code"]),
+            after_enter,
+            writes: vec![],
+            created: vec![],
+            methods: vec![],
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let (shared, count) = (state.clone(), connections.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                count.fetch_add(1, Ordering::SeqCst);
+                let shared = shared.clone();
+                std::thread::spawn(move || serve(stream, shared));
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mock = Mock {
+            port,
+            state,
+            connections,
+            dir,
+        };
+        mock.write_config(&[&mock.endpoint()]);
+        mock
+    }
+
+    fn endpoint(&self) -> String {
+        format!("ws://127.0.0.1:{}", self.port)
+    }
+
+    fn config_path(&self) -> PathBuf {
+        self.dir.path().join("config.toml")
+    }
+
+    fn audit_path(&self) -> PathBuf {
+        self.dir.path().join("state/audit.jsonl")
+    }
+
+    fn write_config(&self, allowed: &[&str]) {
+        let allowed: Vec<String> = allowed.iter().map(|a| format!("{a:?}")).collect();
+        std::fs::write(
+            self.config_path(),
+            format!(
+                "allowed_endpoints = [{}]\naudit_log = {:?}\n",
+                allowed.join(", "),
+                self.audit_path().display().to_string()
+            ),
+        )
+        .unwrap();
+    }
+
+    fn rexctl(&self, args: &[&str]) -> Output {
+        let endpoint = self.endpoint();
+        rexctl(self.dir.path(), &self.config_path(), &endpoint, args)
+    }
+
+    fn writes(&self) -> Vec<(String, String, String)> {
+        self.state.lock().unwrap().writes.clone()
+    }
+
+    fn methods(&self) -> Vec<String> {
+        self.state.lock().unwrap().methods.clone()
+    }
+
+    fn rename(&self, session_id: &str, label: &str) {
+        let mut state = self.state.lock().unwrap();
+        let session = state
+            .sessions
+            .iter_mut()
+            .find(|s| s.0 == session_id)
+            .unwrap();
+        session.1 = label.to_owned();
+    }
+
+    /// The endpoint as rexctl records it in the registry.
+    fn canonical_endpoint(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn registry(&self) -> Registry {
+        Registry::new(self.dir.path().join("xdg-state/rex-relay/owned.json"))
+    }
+
+    /// Records a session as created by rexctl on this mock's endpoint.
+    fn own(&self, session_id: &str, purpose: Option<&str>) {
+        self.registry()
+            .add(Owned {
+                endpoint: self.canonical_endpoint(),
+                session_id: session_id.into(),
+                label: "grokbot-original".into(),
+                created_at: "2026-11-04T00:00:00.000Z".into(),
+                purpose: purpose.map(Into::into),
+            })
+            .unwrap();
+    }
+
+    fn owned_ids(&self) -> Vec<String> {
+        self.registry()
+            .load()
+            .unwrap()
+            .into_iter()
+            .map(|o| o.session_id)
+            .collect()
+    }
+
+    fn audit(&self) -> Vec<Value> {
+        match std::fs::read_to_string(self.audit_path()) {
+            Ok(text) => text
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect(),
+            Err(_) => vec![],
+        }
+    }
+}
+
+fn rexctl(home: &Path, config: &Path, endpoint: &str, args: &[&str]) -> Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_rexctl"))
+        .arg("--config")
+        .arg(config)
+        .arg("--endpoint")
+        .arg(endpoint)
+        .args(args)
+        .env_remove("REX_SERVER")
+        .env_remove("REX_RELAY_CONFIG")
+        .env("HOME", home)
+        .env("XDG_STATE_HOME", home.join("xdg-state"))
+        .output()
+        .unwrap()
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn json_lines(output: &Output) -> Vec<Value> {
+    stdout(output)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l:?}: {e}")))
+        .collect()
+}
+
+fn code(output: &Output) -> i32 {
+    output.status.code().expect("exit code")
+}
+
+// ---- The fake server ----
+
+struct Conn {
+    socket: tungstenite::WebSocket<std::net::TcpStream>,
+    seq: u64,
+}
+
+impl Conn {
+    fn send(&mut self, value: Value) {
+        self.socket.send(Message::text(value.to_string())).unwrap();
+    }
+
+    fn block_event(&mut self, session: &str, block: &str, name: &str, payload: Value) {
+        self.seq += 1;
+        let seq = self.seq;
+        self.send(json!({"type": "event", "seq": seq, "payload": {
+            "type": "session_event",
+            "payload": {"session_id": session, "event": {"type": "block_event", "payload": {
+                "block_id": block, "creator_name": TERMINAL, "name": name, "payload": payload,
+            }}}
+        }}));
+    }
+}
+
+// tungstenite fixes the callback's error type.
+#[allow(clippy::result_large_err)]
+fn accept_control(_: &Request, mut response: Response) -> Result<Response, ErrorResponse> {
+    response
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", "rex.control.v1".parse().unwrap());
+    Ok(response)
+}
+
+fn serve(stream: std::net::TcpStream, state: Arc<Mutex<State>>) {
+    let Ok(socket) = tungstenite::accept_hdr(stream, accept_control) else {
+        return;
+    };
+    let mut conn = Conn { socket, seq: 0 };
+    let Ok(Message::Text(hello)) = conn.socket.read() else {
+        return;
+    };
+    let hello: Value = serde_json::from_str(hello.as_str()).unwrap();
+    assert_eq!(hello["type"], "hello");
+    assert_eq!(hello["api_revision"], 8);
+    conn.send(json!({
+        "type": "welcome", "protocol": "rex.control.v1",
+        "limits": {"max_message_bytes": 1048576},
+        "api_revision": 8, "api_server_revision": 8, "api_min_revision": 7,
+    }));
+    loop {
+        let text = match conn.socket.read() {
+            Ok(Message::Text(text)) => text.as_str().to_owned(),
+            Ok(Message::Close(_)) | Err(_) => return,
+            Ok(_) => continue,
+        };
+        let request: Value = serde_json::from_str(&text).unwrap();
+        let id = request["id"].clone();
+        let method = request["method"].as_str().unwrap().to_owned();
+        let payload = &request["payload"];
+        let (reply, then) = handle(&state, &method, payload);
+        let seq = conn.seq;
+        match reply {
+            Ok(value) => {
+                conn.send(json!({"type": "response", "id": id, "seq": seq, "payload": value}))
+            }
+            Err(message) => conn.send(json!({"type": "response", "id": id, "seq": seq,
+                "error": {"code": "not_found", "message": message, "status": 404}})),
+        }
+        if let Some((session, block, after)) = then {
+            conn.block_event(
+                &session,
+                &block,
+                "program_status_changed",
+                json!({"id": "", "record": record("working", None, None), "reason": "report"}),
+            );
+            let final_record = match after {
+                AfterEnter::Done => Some(record("done", None, None)),
+                AfterEnter::Blocked(kind) => Some(record(
+                    "blocked",
+                    Some(kind),
+                    Some("Allow Bash(cargo test)?"),
+                )),
+                AfterEnter::KeepWorking => None,
+            };
+            if let Some(r) = final_record {
+                conn.block_event(
+                    &session,
+                    &block,
+                    "program_status_changed",
+                    json!({"id": "", "record": r, "reason": "report"}),
+                );
+            }
+        }
+    }
+}
+
+type Then = Option<(String, String, AfterEnter)>;
+
+fn handle(state: &Mutex<State>, method: &str, payload: &Value) -> (Result<Value, String>, Then) {
+    let mut s = state.lock().unwrap();
+    s.methods.push(method.to_owned());
+    let sessions: Vec<Value> = s
+        .sessions
+        .iter()
+        .map(|(id, label, _)| json!({"session_id": id, "label": label}))
+        .collect();
+    let sid = payload["session_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let bid = payload["block_id"].as_str().unwrap_or_default().to_owned();
+    let session = s.sessions.iter().find(|(id, ..)| *id == sid).cloned();
+    let block = session
+        .as_ref()
+        .and_then(|(_, _, blocks)| blocks.iter().find(|b| b.id == bid).cloned());
+    let view = |session: &(String, String, Vec<Block>)| {
+        let blocks: Vec<Value> = session
+            .2
+            .iter()
+            .map(|b| json!({"block_id": b.id, "creator_name": TERMINAL, "flavor": "com.superlogical.terminal.shell"}))
+            .collect();
+        json!({
+            "revision": 1, "session_id": session.0, "label": session.1,
+            "active_window_id": "window:1",
+            "windows": [{"window_id": "window:1", "focused_block_id": session.2.last().map(|b| b.id),
+                "layers": [{"kind": "tiled", "blocks": blocks}]}],
+        })
+    };
+    let reply = match method {
+        "session.list" | "session.attach_all" => Ok(json!({"sessions": sessions})),
+        "session.attach" => match &session {
+            Some(session) => Ok(json!({"client_id": "client:1", "view": view(session)})),
+            None => Err("no such session".into()),
+        },
+        "session.view" => session
+            .as_ref()
+            .map(view)
+            .ok_or_else(|| "no such session".into()),
+        "session.create" => {
+            s.created.push(payload.clone());
+            let label = payload["label"].as_str().unwrap().to_owned();
+            s.sessions
+                .push(("session:new".into(), label, vec![claude(vec![])]));
+            Ok(json!({"session_id": "session:new", "initial_windows": [
+                {"window_id": "window:new", "block_ids": ["block:new"], "revision": 1}]}))
+        }
+        "session.destroy" => {
+            let before = s.sessions.len();
+            s.sessions.retain(|(id, ..)| *id != sid);
+            if s.sessions.len() == before {
+                Err("no such session".into())
+            } else {
+                Ok(json!({}))
+            }
+        }
+        m if m.starts_with(TERMINAL) => {
+            let Some(block) = block else {
+                return (Err("no such block".into()), None);
+            };
+            match &m[TERMINAL.len()..] {
+                ".program_status" => Ok(json!({"records": block.records})),
+                ".process" => {
+                    Ok(json!({"foreground": {"pid": 7, "user_id": 1000, "name": block.foreground}}))
+                }
+                ".title" => Ok(json!({"title": ""})),
+                ".modes" => Ok(json!({"screen": "primary", "modes": [
+                    {"name": "bracketed_paste", "number": 2004, "set": block.bracketed_paste}]})),
+                ".format" => Ok(json!({"content": s.screen.join("\n")})),
+                ".write" => {
+                    let data = payload["args"]["data"].as_str().unwrap().to_owned();
+                    s.writes.push((sid.clone(), bid.clone(), data.clone()));
+                    let reply = Ok(json!({"bytes_written": data.len()}));
+                    if data == "\r" {
+                        s.screen = screen(&[
+                            "Welcome to Claude Code",
+                            "> fix the bug",
+                            "● Fixed it.",
+                            "  Updated src/lib.rs",
+                        ]);
+                        return (reply, Some((sid, bid, s.after_enter)));
+                    }
+                    reply
+                }
+                _ => Err(format!("unknown method {m}")),
+            }
+        }
+        _ => Err(format!("unknown method {method}")),
+    };
+    (reply, None)
+}
+
+// ---- Tests ----
+
+const SID: &str = "session:0000-demo";
+
+const FOREIGN: &str = "session:0000-work";
+
+/// An owned session `grokbot-demo` and a foreign one, `work`.
+fn demo(records: Vec<Value>, after: AfterEnter) -> Mock {
+    let mock = Mock::start(
+        vec![
+            (SID, "grokbot-demo", vec![shell(), claude(records)]),
+            (FOREIGN, "work", vec![claude(vec![])]),
+        ],
+        after,
+    );
+    mock.own(SID, Some("demo the relay"));
+    mock
+}
+
+#[test]
+fn send_pastes_streams_and_exits_done() {
+    let mock = demo(vec![record("done", None, None)], AfterEnter::Done);
+    let output = mock.rexctl(&[
+        "send",
+        "grokbot-demo",
+        "fix the bug\nplease",
+        "--poll",
+        "100ms",
+    ]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    let text = stdout(&output);
+    assert!(text.contains("● Fixed it."), "{text}");
+    assert!(
+        !text.contains("Welcome to Claude Code"),
+        "baseline repeated: {text}"
+    );
+
+    let claude_block = claude(vec![]).id;
+    assert_eq!(
+        mock.writes(),
+        [
+            (
+                SID.into(),
+                claude_block.into(),
+                "\x1b[200~fix the bug\nplease\x1b[201~".into()
+            ),
+            (SID.into(), claude_block.into(), "\r".into()),
+        ]
+    );
+
+    let audit = mock.audit();
+    assert_eq!(audit.len(), 2, "{audit:?}");
+    assert_eq!(audit[0]["result"], "sent");
+    assert_eq!(audit[1]["result"], "done");
+    for entry in &audit {
+        assert_eq!(entry["command"], "send");
+        assert_eq!(entry["session"], SID);
+        assert_eq!(entry["block"], claude_block);
+        assert_eq!(entry["msg_len"], 18);
+        assert_eq!(entry["endpoint"], format!("http://127.0.0.1:{}", mock.port));
+        assert_eq!(
+            entry["msg_sha256"],
+            rex_relay::audit::sha256_hex(b"fix the bug\nplease")
+        );
+    }
+    let raw = std::fs::read_to_string(mock.audit_path()).unwrap();
+    assert!(!raw.contains("fix the bug"));
+}
+
+#[test]
+fn send_json_reports_needs_approval() {
+    let mock = demo(vec![], AfterEnter::Blocked("permission"));
+    let output = mock.rexctl(&[
+        "--json",
+        "send",
+        "grokbot-demo",
+        "run the tests",
+        "--poll",
+        "100ms",
+    ]);
+    assert_eq!(code(&output), 10, "{output:?}");
+    let events = json_lines(&output);
+    assert_eq!(events[0]["type"], "sent");
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "status" && e["status"] == "working")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "output" && e["line"] == "● Fixed it.")
+    );
+    let last = events.last().unwrap();
+    assert_eq!(last["type"], "result");
+    assert_eq!(last["status"], "needs_approval");
+    assert_eq!(last["label"], "Needs approval");
+    assert_eq!(last["msg"], "Allow Bash(cargo test)?");
+    assert_eq!(last["exit_code"], 10);
+    assert_eq!(mock.audit().last().unwrap()["result"], "needs_approval");
+}
+
+#[test]
+fn send_exit_codes_for_question_and_sign_in() {
+    for (kind, exit) in [("question", 11), ("auth", 13)] {
+        let mock = demo(vec![], AfterEnter::Blocked(kind));
+        let output = mock.rexctl(&["send", "grokbot-demo", "go", "--quiet"]);
+        assert_eq!(code(&output), exit, "{kind}: {output:?}");
+    }
+}
+
+#[test]
+fn send_times_out() {
+    let mock = demo(vec![], AfterEnter::KeepWorking);
+    let output = mock.rexctl(&[
+        "--json",
+        "send",
+        "grokbot-demo",
+        "go",
+        "--timeout",
+        "1s",
+        "--poll",
+        "200ms",
+    ]);
+    assert_eq!(code(&output), 15, "{output:?}");
+    let last = json_lines(&output).pop().unwrap();
+    assert_eq!(last["status"], "timeout");
+    assert_eq!(last["last_status"], "working");
+    assert_eq!(mock.audit().last().unwrap()["result"], "timeout");
+}
+
+#[test]
+fn send_refuses_foreign_sessions() {
+    let mock = demo(vec![], AfterEnter::Done);
+    let output = mock.rexctl(&["send", "work", "hello"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--allow-foreign"));
+    assert!(mock.writes().is_empty());
+    let audit = mock.audit();
+    assert_eq!(audit.len(), 1);
+    assert!(audit[0]["result"].as_str().unwrap().starts_with("refused:"));
+
+    let output = mock.rexctl(&["send", "work", "hello", "--allow-foreign", "--quiet"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(mock.writes().len(), 2);
+}
+
+#[test]
+fn ownership_follows_the_session_id_not_the_label() {
+    let mock = demo(vec![], AfterEnter::Done);
+    // Claude Code renamed the owned session, and someone made a foreign session that looks
+    // like one of ours.
+    mock.rename(SID, "Fix the flaky CI job");
+    mock.rename(FOREIGN, "grokbot-demo");
+
+    let output = mock.rexctl(&["send", "grokbot-demo", "hello"]);
+    assert_eq!(code(&output), 3, "lookalike label: {output:?}");
+    assert!(mock.writes().is_empty());
+    assert!(
+        !mock.methods().contains(&"session.attach".to_owned()),
+        "refused before attaching"
+    );
+
+    let output = mock.rexctl(&["send", "Fix the flaky CI job", "hello", "--quiet"]);
+    assert_eq!(code(&output), 0, "current label resolves: {output:?}");
+    let output = mock.rexctl(&["send", SID, "hello again", "--quiet"]);
+    assert_eq!(code(&output), 0, "id resolves: {output:?}");
+    assert!(mock.writes().iter().all(|(sid, ..)| sid == SID));
+
+    // Ownership is per endpoint: the same id registered elsewhere doesn't count.
+    let other = demo(vec![], AfterEnter::Done);
+    other
+        .registry()
+        .remove(&other.canonical_endpoint(), SID)
+        .unwrap();
+    other
+        .registry()
+        .add(Owned {
+            endpoint: "https://rex-host.example.ts.net".into(),
+            session_id: SID.into(),
+            label: "grokbot-demo".into(),
+            created_at: "2026-11-04T00:00:00.000Z".into(),
+            purpose: None,
+        })
+        .unwrap();
+    let output = other.rexctl(&["send", SID, "hello"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+}
+
+#[test]
+fn ambiguous_labels_are_an_error() {
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.rename(FOREIGN, "grokbot-demo");
+    for args in [
+        &["status", "grokbot-demo"][..],
+        &["close", "grokbot-demo"],
+        &["send", "grokbot-demo", "hi", "--allow-foreign"],
+    ] {
+        let output = mock.rexctl(args);
+        assert_eq!(code(&output), 1, "{args:?}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("more than one session"),
+            "{output:?}"
+        );
+    }
+    assert!(mock.writes().is_empty());
+    assert!(!mock.methods().contains(&"session.destroy".to_owned()));
+}
+
+#[test]
+fn close_closes_owned_sessions_only() {
+    let mock = demo(vec![], AfterEnter::Done);
+
+    // Foreign sessions are never closed, and the refusal sends no close request.
+    for args in [&["close", "work"][..], &["close", FOREIGN]] {
+        let output = mock.rexctl(args);
+        assert_eq!(code(&output), 3, "{args:?}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("never closes"));
+    }
+    let output = mock.rexctl(&["close", "work", "--allow-foreign"]);
+    assert_eq!(code(&output), 2, "close has no override: {output:?}");
+    assert!(!mock.methods().contains(&"session.destroy".to_owned()));
+    assert!(mock.state.lock().unwrap().sessions.len() == 2);
+
+    // An owned session, under its current label.
+    mock.rename(SID, "Renamed by Claude");
+    let output = mock.rexctl(&["--json", "close", "Renamed by Claude"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(json_lines(&output)[0]["session_id"], SID);
+    assert_eq!(
+        mock.methods()
+            .iter()
+            .filter(|m| *m == "session.destroy")
+            .count(),
+        1
+    );
+    let remaining: Vec<_> = mock
+        .state
+        .lock()
+        .unwrap()
+        .sessions
+        .iter()
+        .map(|s| s.0.clone())
+        .collect();
+    assert_eq!(remaining, [FOREIGN]);
+    assert!(mock.owned_ids().is_empty(), "removed from the registry");
+
+    let audit = mock.audit();
+    let results: Vec<_> = audit
+        .iter()
+        .map(|e| e["result"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(audit.iter().filter(|e| e["command"] == "close").count(), 3);
+    assert!(results[0].starts_with("refused:"));
+    assert!(results[1].starts_with("refused:"));
+    assert_eq!(results[2], "closed");
+    assert_eq!(audit[2]["session"], SID);
+    assert_eq!(audit[2]["session_label"], "Renamed by Claude");
+
+    // Gone from both the server and the registry: there is nothing left to close.
+    let output = mock.rexctl(&["close", SID]);
+    assert_eq!(code(&output), 1, "{output:?}");
+}
+
+#[test]
+fn close_forgets_owned_sessions_that_are_already_gone() {
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.own("session:0000-vanished", None);
+    let output = mock.rexctl(&["close", "session:0000-vanished"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(mock.owned_ids(), [SID]);
+    assert!(!mock.methods().contains(&"session.destroy".to_owned()));
+    assert_eq!(
+        mock.audit().last().unwrap()["result"],
+        "already gone; removed from registry"
+    );
+}
+
+#[test]
+fn a_corrupt_registry_fails_closed() {
+    let mock = demo(vec![], AfterEnter::Done);
+    std::fs::write(mock.registry().path(), "{oops").unwrap();
+    for args in [
+        &["send", "grokbot-demo", "hi"][..],
+        &["close", "grokbot-demo"],
+        &["list"],
+    ] {
+        let output = mock.rexctl(args);
+        assert_eq!(code(&output), 1, "{args:?}: {output:?}");
+    }
+    assert!(mock.writes().is_empty());
+    assert!(!mock.methods().contains(&"session.destroy".to_owned()));
+}
+
+#[test]
+fn send_refuses_pending_prompts_without_answer() {
+    let mock = demo(
+        vec![record("blocked", Some("question"), Some("Which file?"))],
+        AfterEnter::Done,
+    );
+    let output = mock.rexctl(&["send", "grokbot-demo", "src/lib.rs"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(mock.writes().is_empty());
+    let output = mock.rexctl(&["send", "grokbot-demo", "src/lib.rs", "--answer", "--quiet"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+
+    let mock = demo(
+        vec![record("blocked", Some("auth"), None)],
+        AfterEnter::Done,
+    );
+    let output = mock.rexctl(&["send", "grokbot-demo", "hunter2", "--answer"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(mock.writes().is_empty());
+}
+
+#[test]
+fn send_rejects_bad_messages_before_writing() {
+    let mock = demo(vec![], AfterEnter::Done);
+    for message in ["up\x1b[A", "a\rb", "\x03"] {
+        let output = mock.rexctl(&["send", "grokbot-demo", message]);
+        assert_eq!(code(&output), 3, "{message:?}: {output:?}");
+    }
+    let big = "x".repeat(40 * 1024);
+    let output = mock.rexctl(&["send", "grokbot-demo", &big]);
+    assert_eq!(code(&output), 3);
+    let output = mock.rexctl(&["send", "grokbot-demo", "four", "--max-bytes", "3"]);
+    assert_eq!(code(&output), 3);
+    // --max-bytes can only lower the configured limit.
+    let output = mock.rexctl(&["send", "grokbot-demo", &big, "--max-bytes", "1000000"]);
+    assert_eq!(code(&output), 3);
+    assert!(mock.writes().is_empty());
+    let audit = mock.audit();
+    assert_eq!(audit.len(), 6);
+    assert!(
+        audit
+            .iter()
+            .all(|e| e["result"].as_str().unwrap().starts_with("refused:"))
+    );
+}
+
+#[test]
+fn endpoints_outside_the_allowlist_are_never_contacted() {
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.write_config(&["https://rex-host.example.ts.net"]);
+    for args in [&["list"][..], &["send", "grokbot-demo", "hi"]] {
+        let output = mock.rexctl(args);
+        assert_eq!(code(&output), 3, "{args:?}: {output:?}");
+    }
+    assert_eq!(mock.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(mock.audit().len(), 1, "the refused send is audited");
+}
+
+#[test]
+fn the_endpoint_comes_from_rex_server_or_config() {
+    let mock = demo(vec![], AfterEnter::Done);
+    let run = |extra_config: &str, env: Option<&str>| {
+        std::fs::write(
+            mock.config_path(),
+            format!(
+                "allowed_endpoints = [{:?}]\n{extra_config}",
+                mock.endpoint()
+            ),
+        )
+        .unwrap();
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_rexctl"));
+        command
+            .arg("--config")
+            .arg(mock.config_path())
+            .args(["--json", "list"])
+            .env_remove("REX_SERVER")
+            .env("HOME", mock.dir.path());
+        if let Some(env) = env {
+            command.env("REX_SERVER", env);
+        }
+        command.output().unwrap()
+    };
+    assert_eq!(code(&run("", None)), 1, "no endpoint anywhere");
+    assert_eq!(code(&run("", Some(&mock.endpoint()))), 0);
+    let from_config = format!("endpoint = {:?}\n", mock.endpoint());
+    assert_eq!(code(&run(&from_config, None)), 0);
+}
+
+#[test]
+fn wait_returns_the_current_stop_status() {
+    for (records, exit) in [
+        (vec![record("done", None, None)], 0),
+        (vec![record("blocked", Some("permission"), None)], 10),
+        (vec![record("blocked", None, None)], 12),
+        (vec![record("error", None, Some("crashed"))], 14),
+    ] {
+        let mock = demo(records, AfterEnter::Done);
+        let output = mock.rexctl(&["wait", "grokbot-demo", "--quiet"]);
+        assert_eq!(code(&output), exit, "{output:?}");
+        assert!(mock.writes().is_empty());
+        assert!(mock.audit().is_empty(), "wait is read-only");
+    }
+    let mock = demo(vec![record("working", None, None)], AfterEnter::Done);
+    let output = mock.rexctl(&["wait", "grokbot-demo", "--timeout", "1s"]);
+    assert_eq!(code(&output), 15, "{output:?}");
+}
+
+#[test]
+fn new_creates_prefixed_session_and_audits() {
+    let mock = demo(vec![], AfterEnter::Done);
+    let output = mock.rexctl(&[
+        "--json",
+        "new",
+        "fix-ci",
+        "--cwd",
+        "/srv/app",
+        "--cmd",
+        "claude --verbose",
+        "--purpose",
+        "Fix the CI pipeline",
+    ]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    let event = &json_lines(&output)[0];
+    assert_eq!(event["type"], "created");
+    assert_eq!(event["label"], "grokbot-fix-ci");
+    assert_eq!(event["session_id"], "session:new");
+    assert_eq!(event["block_id"], "block:new");
+    assert_eq!(event["purpose"], "Fix the CI pipeline");
+
+    let owned = mock
+        .registry()
+        .find(&mock.canonical_endpoint(), "session:new")
+        .unwrap()
+        .expect("recorded as owned");
+    assert_eq!(owned.label, "grokbot-fix-ci");
+    assert_eq!(owned.purpose.as_deref(), Some("Fix the CI pipeline"));
+    assert!(owned.created_at.ends_with('Z'));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(mock.registry().path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    let created = mock.state.lock().unwrap().created.clone();
+    assert_eq!(created[0]["label"], "grokbot-fix-ci");
+    let block = &created[0]["initial_windows"][0]["layout"]["block"];
+    assert_eq!(block["flavor"], "com.superlogical.terminal.shell");
+    assert_eq!(block["options"]["cwd"], "/srv/app");
+    assert_eq!(block["options"]["command"], json!(["claude", "--verbose"]));
+
+    let audit = mock.audit();
+    assert_eq!(audit[0]["command"], "new");
+    assert_eq!(audit[0]["result"], "created");
+    assert_eq!(audit[0]["session"], "session:new");
+
+    let again = mock.rexctl(&["new", "grokbot-fix-ci"]);
+    assert_eq!(code(&again), 3, "duplicate label: {again:?}");
+    let bad = mock.rexctl(&["new", "x", "--purpose", "two\nlines"]);
+    assert_eq!(code(&bad), 3, "{bad:?}");
+    assert_eq!(mock.state.lock().unwrap().created.len(), 1);
+
+    // Sessions rexctl created can be sent to and closed, whatever Claude Code renames them.
+    mock.rename("session:new", "CI pipeline fix");
+    let output = mock.rexctl(&["send", "CI pipeline fix", "go", "--quiet"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    let output = mock.rexctl(&["close", "session:new"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert!(
+        mock.registry()
+            .find(&mock.canonical_endpoint(), "session:new")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn list_status_and_read() {
+    let mock = demo(
+        vec![record("working", None, Some("Editing files"))],
+        AfterEnter::Done,
+    );
+
+    let output = mock.rexctl(&["--json", "list"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    let sessions = json_lines(&output);
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0]["label"], "grokbot-demo");
+    assert_eq!(sessions[0]["owned"], true);
+    assert_eq!(sessions[0]["purpose"], "demo the relay");
+    assert_eq!(sessions[0]["created_label"], "grokbot-original");
+    assert_eq!(sessions[1]["owned"], false);
+    assert!(sessions[1]["purpose"].is_null());
+
+    // Ownership is shown by id, so a renamed session stays marked and a lookalike isn't.
+    mock.rename(SID, "Renamed");
+    mock.rename(FOREIGN, "grokbot-lookalike");
+    let output = mock.rexctl(&["list"]);
+    assert_eq!(
+        stdout(&output),
+        format!("* {SID}\tRenamed\tdemo the relay\n  {FOREIGN}\tgrokbot-lookalike\n")
+    );
+    mock.rename(SID, "grokbot-demo");
+
+    let output = mock.rexctl(&["--json", "status", "grokbot-demo"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    let status = &json_lines(&output)[0];
+    assert_eq!(status["block_id"], claude(vec![]).id);
+    assert_eq!(status["status"], "working");
+    assert_eq!(status["msg"], "Editing files");
+    assert_eq!(status["program"], "claude");
+
+    let output = mock.rexctl(&["status", SID]);
+    assert!(
+        stdout(&output).contains("Working — Editing files"),
+        "{output:?}"
+    );
+
+    let output = mock.rexctl(&["read", "grokbot-demo", "--lines", "2"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(stdout(&output), format!("{}\n{}\n", BOX[2], BOX[3]));
+}
+
+#[test]
+fn panes_without_claude_need_block() {
+    let mock = Mock::start(
+        vec![(SID, "grokbot-shell", vec![shell()])],
+        AfterEnter::Done,
+    );
+    mock.own(SID, None);
+    let output = mock.rexctl(&["status", "grokbot-shell"]);
+    assert_eq!(code(&output), 1, "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--block"));
+
+    let output = mock.rexctl(&["--json", "status", "grokbot-shell", "--block", "5he11"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(json_lines(&output)[0]["block_id"], shell().id);
+
+    // The shell never turned on bracketed paste, so send won't type into it.
+    let output = mock.rexctl(&["send", "grokbot-shell", "ls", "--block", "5he11"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(mock.writes().is_empty());
+}
+
+#[test]
+fn usage_errors_exit_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = rexctl(
+        dir.path(),
+        &dir.path().join("c.toml"),
+        "http://127.0.0.1:9",
+        &["send"],
+    );
+    assert_eq!(code(&output), 2);
+}
