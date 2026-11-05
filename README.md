@@ -1,9 +1,9 @@
 # rex-relay
 
 `rexctl` drives [Claude Code](https://claude.com/claude-code) panes in
-[Rex](https://www.superlogical.com/rex) sessions from the command line, so that another program
-(a bot, a script, a CI job) can hand Claude Code a message and wait for the outcome — without
-ever answering a permission prompt on the user's behalf.
+[Rex](https://www.superlogical.com/rex) sessions from the command line. Another program, such as
+a bot, a script, or a CI job, can hand Claude Code a message and wait for the outcome. `rexctl`
+never answers a permission prompt on the user's behalf.
 
 It talks to Rex's control API: a WebSocket at `GET /api/control` with subprotocol
 `rex.control.v1`, API revision 8. Revision 8 exposes each program's OSC 7501 status (Working,
@@ -23,19 +23,61 @@ $ echo $?
 10
 ```
 
+## Status
+
+`rexctl` is at 0.1.0. It needs a Rex server that speaks control API revision 8. CI runs on Linux,
+and development happens on macOS. Windows is untested, and `unix://` endpoints need a Unix
+platform.
+
+`send` decides whether Claude Code is at its input prompt by reading the pane's screen (see
+[How `send` delivers](#how-send-delivers)). If a Claude Code release changes how the prompt
+looks, `send` refuses with exit 3 until `src/prompt.rs` learns the new layout.
+
 ## Install
 
-Requires a Rust toolchain (stable).
+You need Rust 1.89 or later.
 
 ```sh
-cargo install --path .        # installs rexctl into ~/.cargo/bin
-# or
-cargo build --release         # target/release/rexctl
+cargo install --locked --git https://github.com/mbriggs/rex-relay   # installs rexctl into ~/.cargo/bin
 ```
+
+To build from a checkout instead, run `cargo build --release --locked`. The binary is
+`target/release/rexctl`.
 
 `https://` endpoints, such as a Rex server published with Tailscale Serve, use TLS (rustls,
 with the Mozilla root store from `webpki-roots`). `http://` and `unix://` endpoints are
 supported for local servers.
+
+## Quick start
+
+1. Allow your Rex server in `~/.config/rex-relay/config.toml`:
+
+   ```toml
+   endpoint = "https://rex-host.example.ts.net"
+   allowed_endpoints = ["https://rex-host.example.ts.net"]
+   ```
+
+2. Create a session that runs Claude Code, and keep its id:
+
+   ```sh
+   SID=$(rexctl --json new smoke --cwd ~/src/project --purpose "try rexctl" | jq -r .session_id)
+   ```
+
+3. In Rex, answer Claude Code's first-run questions, such as whether to trust the folder.
+   `rexctl` never answers them for you.
+
+4. Send a message and wait for the result:
+
+   ```sh
+   rexctl send "$SID" "Reply with the word pong."
+   echo $?   # 0 when Claude Code is done; see Exit codes for the rest
+   ```
+
+5. Close the session:
+
+   ```sh
+   rexctl close "$SID"
+   ```
 
 ## Configuration
 
@@ -72,7 +114,7 @@ may no longer work; the id always does. A label that matches more than one sessi
 | `rexctl list` | Lists sessions. `*` (or `"owned": true`) marks sessions rexctl created, followed by their purpose. |
 | `rexctl status <session> [--block ID]` | Shows the Claude Code pane's status and message. |
 | `rexctl read <session> [--lines N] [--block ID]` | Prints the pane's last N lines (default 100; 0 for all). |
-| `rexctl new <label> [--cwd DIR] [--cmd claude] [--purpose TEXT]` | Creates a session with initial label `<prefix><label>`, whose one pane runs `--cmd` (default `claude`, split on whitespace) in `--cwd`, and records it in the ownership registry. |
+| `rexctl new <label> [--cwd DIR] [--cmd claude] [--purpose TEXT]` | Creates a session with initial label `<prefix><label>`, whose one pane runs `--cmd` (default `claude`, with arguments quoted as in a shell, though no shell runs it) in `--cwd`, and records it in the ownership registry. |
 | `rexctl send <session> "msg"` | Pastes the message into the Claude Code pane, presses Enter once, then streams the pane's new output until Claude Code stops. Owned sessions only, unless `--allow-foreign`. |
 | `rexctl wait <session>` | Streams the pane's new output until Claude Code stops working. Returns at once if it isn't working. |
 | `rexctl close <session>` | Closes a session rexctl created, and removes it from the registry. There is no override: other sessions are never closed. |
@@ -118,10 +160,15 @@ process (`claude`, or the npm package's `claude-code/cli.js`), or a terminal tit
 
 ### How `send` delivers
 
+Before typing, `send` checks that the pane is at Claude Code's input prompt. It refuses if the
+pane hasn't enabled bracketed paste (mode 2004). It then reads the bottom of the pane's screen
+and looks for the prompt: a `❯` line directly under a `────` rule, or `│ >` under `╭───╮` in
+older Claude Code versions. If the screen shows a numbered menu instead, such as the
+"Do you trust the files in this folder?" dialog or a permission request, `send` refuses. In a
+menu, Enter picks the highlighted option. A screen that matches neither layout is refused too.
+
 The message is written as one bracketed paste (`ESC[200~ … ESC[201~`), so newlines stay inside
-the message, followed after a short pause by a single carriage return (Enter). `send` refuses if
-the pane hasn't enabled bracketed paste (mode 2004), which means it isn't sitting at Claude
-Code's prompt.
+the message, followed after a short pause by a single carriage return (Enter).
 
 After Enter, `send` follows the pane's `program_status_changed` events (re-reading the status
 every few seconds in case one is missed) and ends at the first stop after the message: Done,
@@ -173,24 +220,32 @@ and `close` print `session`, `status`, `text`, `created` and `closed` objects.
    can never be closed or killed through rexctl.
 3. **No auto-answers.** `rexctl` never answers an approval or question by itself. `send` refuses
    while the pane is in Needs approval or Question unless `--answer` says the message is the
-   answer, and always refuses while it is in Needs sign-in: it never types into a credential
-   prompt.
-4. **Text only, bounded.** There are no raw-key or kill commands, and `close` is limited as
+   answer. It always refuses while the pane is in Needs sign-in, so it never types into a
+   credential prompt.
+4. **Input prompt only.** `send` types only at Claude Code's input prompt, which it finds on the
+   pane's screen. It refuses menus, such as the folder-trust dialog and permission requests, even
+   with `--answer`, and it refuses screens it doesn't recognize.
+5. **Text only, bounded.** There are no raw-key or kill commands, and `close` is limited as
    above. Messages may contain
    printable text, newline and tab; any other control character (ESC, CR, Ctrl-C, DEL, C1
    controls, NUL) is refused. Messages larger than `max_message_bytes` (default 32 KiB) are
    refused; `--max-bytes` can lower that limit for one call but not raise it.
-5. **Audit log.** Every mutating call (`new`, `send`, `close`), refused ones included, appends a
+6. **Audit log.** Every mutating call (`new`, `send`, `close`), refused ones included, appends a
    JSON line
    to `~/.local/state/rex-relay/audit.jsonl` (or `$XDG_STATE_HOME/rex-relay/`, or the config's
    `audit_log`): timestamp, command, canonical endpoint, session, block, the message's SHA-256
    and length (never its text), and the result. A delivered `send` writes a `sent` entry, then
    one with the outcome (`done`, `needs_approval`, `timeout`, …). The file is created `0600` in a
    `0700` directory; if it can't be opened, nothing is sent. No credentials are logged.
-6. **Endpoint allowlist.** Only endpoints in `allowed_endpoints` are contacted; there is no
+7. **Endpoint allowlist.** Only endpoints in `allowed_endpoints` are contacted; there is no
    hardcoded endpoint.
 
+These rails limit what `rexctl` does. They don't limit other clients of the Rex server. Read
+[SECURITY.md](SECURITY.md) before you expose a Rex server on a network.
+
 ## Development
+
+The minimum supported Rust is 1.89, set by `rust-version` in `Cargo.toml` and checked in CI.
 
 ```sh
 cargo fmt --check
@@ -224,6 +279,8 @@ dedicated config whose `allowed_endpoints` holds only that server.
 - [ ] After Claude Code renames the session, `rexctl list` still marks it `*`, and `send` by its
       new label works.
 - [ ] A multi-line message arrives as one prompt (bracketed paste) and is submitted once.
+- [ ] `rexctl new` in a directory Claude Code hasn't trusted yet, then an immediate
+      `rexctl send`, exits 3 with "never picks menu options". The trust dialog stays open.
 - [ ] `rexctl send "$SID" "Create hello.txt containing hi."` exits 10 at the permission prompt
       (with default permissions); a second plain `send` then exits 3; nothing was approved.
 - [ ] Answer the prompt in Rex by hand, then `rexctl wait "$SID"` exits 0 once done.
@@ -238,3 +295,12 @@ dedicated config whose `allowed_endpoints` holds only that server.
 - [ ] `rexctl read "$SID" --lines 20` prints the pane's last 20 lines.
 - [ ] `rexctl close "$SID"` closes the session, removes it from `owned.json`, and logs `closed`.
       Close `grokbot-fake` in Rex by hand.
+
+## Security
+
+[SECURITY.md](SECURITY.md) describes the threat model and how to report a vulnerability.
+
+## License
+
+rex-relay doesn't have a license yet. The vendored `vendor/rexrs` is MIT OR Apache-2.0; see
+[`vendor/rexrs/NOTICE`](vendor/rexrs/NOTICE).

@@ -20,7 +20,9 @@ License
 -------
 
 rexrs is licensed MIT OR Apache-2.0, at your option; see LICENSE-MIT and LICENSE-APACHE. The
-upstream manifest declares that license; the license texts were added by the patched copy.
+upstream manifest declares that license; the license texts were added by the patched copy. The
+rex-rune repository as a whole is MIT-licensed, and its vendor/rexrs directory keeps the crate's
+dual-license manifest and texts.
 
 Changes in this copy
 --------------------
