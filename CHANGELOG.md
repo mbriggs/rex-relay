@@ -3,6 +3,14 @@
 This project follows [Semantic Versioning](https://semver.org/). Before 1.0, minor releases may
 change the command-line interface.
 
+## Unreleased
+
+### Fixed
+
+- `new --cwd` expands a leading `~` to the Rex host's home directory, and fails if the
+  directory doesn't exist there. Before, Rex started the pane in the home directory without an
+  error. `--cwd` must be an absolute path, `~`, or a path under `~/` (#13).
+
 ## [0.1.0] - 2026-11-04
 
 The first release, under the MIT License.

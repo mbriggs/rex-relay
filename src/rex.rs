@@ -276,6 +276,45 @@ impl Rex {
         })
     }
 
+    /// Resolves `path` (absolute, `~`, or under `~/`) on the server's host and returns it as an
+    /// absolute path, or fails if it isn't a directory there. The control API resolves paths
+    /// only from a terminal, so this asks from a throwaway session and closes it again.
+    pub fn resolve_dir(&mut self, path: &str) -> Result<String> {
+        // Calls on a session need this, list_dir and destroy included.
+        self.observe_all()?;
+        let probe = self.create(Some("rex-relay cwd check"), None, &[])?;
+        let listed = match &probe.block {
+            Some(block) => self
+                .client
+                .call(
+                    terminal::ListDir::new()
+                        .path(path)
+                        .limit(1)
+                        .on(probe.session.as_str(), block.as_str()),
+                )
+                .map_err(anyhow::Error::from),
+            None => Err(anyhow::anyhow!("the server created no block")),
+        };
+        self.destroy(&probe.session).with_context(|| {
+            format!(
+                "couldn't close {}, a session opened to check --cwd",
+                probe.session
+            )
+        })?;
+        let listed = listed.context("checking --cwd on the Rex host")?;
+        let problem = match listed.status.as_str() {
+            "ok" => return Ok(listed.path),
+            "missing" => "doesn't exist",
+            "not_dir" => "isn't a directory",
+            "denied" => "can't be read by the Rex server",
+            other => bail!(
+                "--cwd {path:?}: the Rex host reported {other:?} for {}",
+                listed.path
+            ),
+        };
+        bail!("--cwd {path:?}: {} {problem} on the Rex host", listed.path)
+    }
+
     /// Closes a session and every block in it. Callers must check ownership first.
     pub fn destroy(&mut self, session_id: &SessionId) -> Result<()> {
         self.client
