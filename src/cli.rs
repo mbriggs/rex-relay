@@ -52,23 +52,7 @@ pub enum Command {
         lines: usize,
     },
     /// Create a session that runs Claude Code, and record its id as owned by rex-relay.
-    New {
-        /// The session's initial label. Claude Code may rename the session later; rex-relay tracks
-        /// it by id. Without a label, Rex picks one.
-        label: Option<String>,
-        /// The directory the pane starts in, on the Rex host: an absolute path, `~`, or a path
-        /// under `~/`. The Rex host expands `~` to its own home directory, and `new` fails if the
-        /// directory doesn't exist there.
-        #[arg(long, value_name = "DIR", value_parser = parse_cwd)]
-        cwd: Option<String>,
-        /// The program to run and its arguments. Quote arguments as a shell would, such as
-        /// --cmd "claude --append-system-prompt 'Be terse.'"; no shell runs it.
-        #[arg(long, default_value = "claude", value_parser = parse_program, value_name = "COMMAND")]
-        cmd: Program,
-        /// What the session is for, kept in the ownership registry and shown by `list`.
-        #[arg(long, value_name = "TEXT")]
-        purpose: Option<String>,
-    },
+    New(NewArgs),
     /// Send a message to Claude Code, then stream its output until it stops.
     Send(SendArgs),
     /// Stream a session's Claude Code output until it stops working.
@@ -81,6 +65,34 @@ pub enum Command {
         /// The session's id (session:…) or label, current or from `new`.
         session: String,
     },
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct NewArgs {
+    /// The session's initial label. Claude Code may rename the session later; rex-relay tracks
+    /// it by id. Without a label, Rex picks one.
+    pub label: Option<String>,
+    /// The directory the pane starts in, on the Rex host: an absolute path, `~`, or a path
+    /// under `~/`. The Rex host expands `~` to its own home directory, and `new` fails if the
+    /// directory doesn't exist there.
+    #[arg(long, value_name = "DIR", value_parser = parse_cwd)]
+    pub cwd: Option<String>,
+    /// The program to run and its arguments. Quote arguments as a shell would, such as
+    /// --cmd "claude --append-system-prompt 'Be terse.'"; no shell runs it.
+    #[arg(long, default_value = "claude", value_parser = parse_program, value_name = "COMMAND")]
+    pub cmd: Program,
+    /// What the session is for, kept in the ownership registry and shown by `list`.
+    #[arg(long, value_name = "TEXT")]
+    pub purpose: Option<String>,
+    /// After creating the session, wait until Claude Code is at its input prompt, where `send`
+    /// would type. If it shows a dialog instead, exit with that status's code and print the
+    /// dialog's text.
+    #[arg(long)]
+    pub wait_ready: bool,
+    /// With --wait-ready, how long to wait for the prompt, such as 90s. Defaults to the
+    /// config's timeout, or 30m.
+    #[arg(long, requires = "wait_ready", value_parser = humantime::parse_duration, value_name = "DURATION")]
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Args)]

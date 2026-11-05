@@ -7,7 +7,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::audit::{self, AuditLog, Entry};
-use crate::cli::{Cli, Command, Program, RunArgs, SendArgs, Target, WaitArgs, WaitOptions};
+use crate::cli::{
+    Cli, Command, NewArgs, Program, RunArgs, SendArgs, Target, WaitArgs, WaitOptions,
+};
 use crate::config::{self, Config};
 use crate::endpoint::Endpoint;
 use crate::exit;
@@ -31,6 +33,10 @@ const KEY_DELAY: Duration = Duration::from_millis(150);
 /// Clearing keystroke pairs `--clear-input` may send before it gives up. Each pair clears one
 /// line or joins an empty line to the one above.
 const MAX_CLEAR_STEPS: usize = 40;
+/// How often `new --wait-ready` reads the new pane.
+const READY_POLL: Duration = Duration::from_millis(500);
+/// How many of the pane's last lines `new --wait-ready` prints when it times out.
+const READY_LINES: usize = 20;
 
 /// Runs the command and returns the process exit code.
 pub fn run(cli: &Cli) -> i32 {
@@ -140,7 +146,7 @@ fn execute(cli: &Cli, out: &Out) -> Result<i32> {
     let audit = AuditLog::new(config.audit_log()?);
     let registry = Registry::new(config.registry()?);
     let mutating = match cli.command {
-        Command::New { .. } => Some("new"),
+        Command::New(_) => Some("new"),
         Command::Send(_) => Some("send"),
         Command::Run(_) => Some("run"),
         Command::Close { .. } => Some("close"),
@@ -149,7 +155,7 @@ fn execute(cli: &Cli, out: &Out) -> Result<i32> {
     if mutating.is_some() {
         audit.ensure_writable()?;
     }
-    if matches!(cli.command, Command::New { .. } | Command::Close { .. }) {
+    if matches!(cli.command, Command::New(_) | Command::Close { .. }) {
         registry.ensure_writable()?;
     }
 
@@ -176,19 +182,7 @@ fn execute(cli: &Cli, out: &Out) -> Result<i32> {
         Command::Tree { session } => tree(&ctx, out, session.as_deref()),
         Command::Status(target) => show_status(&ctx, out, target),
         Command::Read { target, lines } => read(&ctx, out, target, *lines),
-        Command::New {
-            label,
-            cwd,
-            cmd,
-            purpose,
-        } => new(
-            &ctx,
-            out,
-            label.as_deref(),
-            cwd.as_deref(),
-            cmd,
-            purpose.as_deref(),
-        ),
+        Command::New(args) => new(&ctx, out, args),
         Command::Send(args) => send(&ctx, out, args),
         Command::Wait(args) => wait(&ctx, out, args),
         Command::Run(args) => run_shell(&ctx, out, args),
@@ -537,19 +531,19 @@ fn last_lines(text: &str, count: usize) -> Vec<&str> {
     lines
 }
 
-fn new(
-    ctx: &Ctx,
-    out: &Out,
-    label: Option<&str>,
-    cwd: Option<&str>,
-    cmd: &Program,
-    purpose: Option<&str>,
-) -> Result<i32> {
-    let label = label.map(str::trim);
-    let purpose = purpose.map(str::trim);
+fn new(ctx: &Ctx, out: &Out, args: &NewArgs) -> Result<i32> {
+    let label = args.label.as_deref().map(str::trim);
+    let purpose = args.purpose.as_deref().map(str::trim);
     let mut entry = Entry::new("new", ctx.endpoint_key());
     entry.session_label = label.map(str::to_owned);
-    let result = create(ctx, label, cwd, cmd, purpose, &mut entry);
+    let result = create(
+        ctx,
+        label,
+        args.cwd.as_deref(),
+        &args.cmd,
+        purpose,
+        &mut entry,
+    );
     entry.result = match &result {
         Ok(_) => "created".to_owned(),
         Err(error) => audit_error(error),
@@ -571,7 +565,55 @@ fn new(
             label.unwrap_or_default()
         ));
     }
-    Ok(exit::OK)
+    if !args.wait_ready {
+        return Ok(exit::OK);
+    }
+    let timeout = args.timeout.unwrap_or(ctx.config.timeout());
+    wait_ready(ctx, out, &session_id, &block_id, timeout)
+}
+
+/// Reads a new pane until `send` would type into it, or until it shows something a person has
+/// to answer, such as the folder-trust dialog.
+fn wait_ready(
+    ctx: &Ctx,
+    out: &Out,
+    sid: &SessionId,
+    bid: &BlockId,
+    timeout: Duration,
+) -> Result<i32> {
+    let deadline = Instant::now() + timeout;
+    let mut rex = ctx.connect()?;
+    let outcome = loop {
+        let records = rex.program_status(sid, bid)?.1;
+        let status = records.status();
+        let reading = prompt::read(&rex.screen_vt(sid, bid)?);
+        if let Some(dialog) = reading.startup_dialog(status) {
+            let msg = Some(dialog.text.clone());
+            break Outcome::Stopped {
+                status: Status::Dialog,
+                msg,
+            };
+        }
+        if status.is_blocked() || status == Status::Error {
+            let msg = records.msg().map(str::to_owned);
+            break Outcome::Stopped { status, msg };
+        }
+        let paste = rex.bracketed_paste(sid, bid).ok().flatten();
+        if reading.input.is_none()
+            && guard::check_sendable(status, &reading, paste, true, false).is_ok()
+        {
+            break Outcome::Stopped { status, msg: None };
+        }
+        if Instant::now() >= deadline {
+            let text = rex.read_text(sid, bid)?;
+            let lines = last_lines(&text, READY_LINES);
+            print_lines(out, lines.into_iter().map(str::to_owned).collect());
+            break Outcome::TimedOut { status };
+        }
+        std::thread::sleep(READY_POLL);
+    };
+    rex.close();
+    Ok(finish(out, outcome))
 }
 
 fn create(
@@ -809,10 +851,10 @@ impl<'a> Attempt<'a> {
 
         let (seq, records) = rex.program_status(&sid, &bid)?;
         let initial = records.status();
-        guard::check_status_for_send(initial, args.answer)?;
         let reading = prompt::read(&rex.screen_vt(&sid, &bid)?);
         let paste = rex.bracketed_paste(&sid, &bid).ok().flatten();
-        guard::check_ready(&reading, paste, located.evidence.claude_reason().is_some())?;
+        let claude = located.evidence.claude_reason().is_some();
+        guard::check_sendable(initial, &reading, paste, claude, args.answer)?;
         if let Some(input) = reading.input.clone() {
             if !args.clear_input {
                 return Err(guard::leftover_input(&input).into());

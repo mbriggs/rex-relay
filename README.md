@@ -78,7 +78,8 @@ supported for local servers.
    ```
 
 3. In Rex, answer Claude Code's first-run questions, such as whether to trust the folder.
-   `rex-relay` never answers them for you.
+   `rex-relay` never answers them for you. A script can run `new --wait-ready` instead, which
+   returns once `send` would be accepted, or exits 10 with the dialog's text.
 
 4. Send a message and wait for the result:
 
@@ -136,7 +137,7 @@ lists the matching ids; use one of them.
 | `rex-relay tree [session]` | Shows each session's tabs and terminal panes: numbers, labels, ids, the program in each pane, and its OSC 7501 status. |
 | `rex-relay status <target> [--block ID]` | Shows the Claude Code pane's status and message. |
 | `rex-relay read <target> [--lines N] [--block ID]` | Prints the pane's last N lines (default 100; 0 for all). |
-| `rex-relay new [label] [--cwd DIR] [--cmd claude] [--purpose TEXT]` | Creates a session with the initial label `label` (or one Rex picks), whose one pane runs `--cmd` (default `claude`, with arguments quoted as in a shell, though no shell runs it) in `--cwd`, and records it in the ownership registry. `--cwd` is an absolute path, `~`, or a path under `~/`; the Rex host expands `~` to its own home directory. `new` fails if the directory doesn't exist on the Rex host. To check, it opens a session labelled `rex-relay cwd check` and closes it again. |
+| `rex-relay new [label] [--cwd DIR] [--cmd claude] [--purpose TEXT] [--wait-ready [--timeout D]]` | Creates a session with the initial label `label` (or one Rex picks), whose one pane runs `--cmd` (default `claude`, with arguments quoted as in a shell, though no shell runs it) in `--cwd`, and records it in the ownership registry. `--cwd` is an absolute path, `~`, or a path under `~/`; the Rex host expands `~` to its own home directory. `new` fails if the directory doesn't exist on the Rex host. To check, it opens a session labelled `rex-relay cwd check` and closes it again. With `--wait-ready`, `new` prints the ids, then waits until Claude Code is at its input prompt, where `send` would type, and exits 0. If Claude Code shows a dialog first, such as folder trust, it exits with that status's code (10 for a dialog) and prints the dialog's text. If the prompt doesn't appear within `--timeout` (default: the config's `timeout`, or 30m), it prints the pane's last 20 lines and exits 15. |
 | `rex-relay send <target> "msg"` | Pastes the message into the Claude Code pane, presses Enter once, then streams the pane's new output until Claude Code stops. Owned sessions only, unless `--allow-foreign`. |
 | `rex-relay run <target> -- <command>` | Types a command line into a shell pane that is idle at its prompt, presses Enter, and streams the new output until the prompt returns. Owned sessions only, unless `--allow-foreign`. See [Running shell commands](#running-shell-commands). |
 | `rex-relay wait <target>` | Streams the pane's new output until Claude Code stops working. Returns at once if it isn't working. |
@@ -425,6 +426,9 @@ dedicated config whose `allowed_endpoints` holds only that server.
 - [ ] `rex-relay send "$SID" "Create hello.txt containing hi."` exits 10 at the permission prompt
       (with default permissions); a second plain `send` then exits 3; nothing was approved.
 - [ ] Answer the prompt in Rex by hand, then `rex-relay wait "$SID"` exits 0 once done.
+- [ ] `rex-relay new --wait-ready` in a trusted directory exits 0 once the prompt shows, and an
+      immediate `rex-relay send` is accepted. In an untrusted directory it exits 10 and prints
+      the trust dialog.
 - [ ] A prompt that makes Claude Code ask a question exits 11.
 - [ ] `--timeout 5s` on a long task exits 15, and `--json` ends with a `timeout` result.
 - [ ] During a long `send`, drop the network between `rex-relay` and Rex for 20 seconds (such as

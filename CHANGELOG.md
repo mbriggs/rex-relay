@@ -10,6 +10,9 @@ change the command-line interface.
 - A Dialog status for menus Claude Code shows without reporting a status, such as the
   folder-trust dialog. `status` shows the folder it names, and `wait` exits 10 and prints the
   dialog's text instead of reporting Idle.
+- `new --wait-ready [--timeout D]` waits until Claude Code is at its input prompt, so a `send`
+  right after it is accepted. A startup dialog exits 10 with its text; a timeout exits 15 with
+  the pane's last lines (#14).
 
 ### Changed
 
