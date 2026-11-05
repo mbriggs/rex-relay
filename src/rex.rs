@@ -3,10 +3,12 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use rexrs::api::client::{self, ReplyError};
 use rexrs::api::session::{self, ViewResponse};
 use rexrs::api::terminal::{self, ProcessResponse};
 use rexrs::api::{BlockMethod, Layout};
 use rexrs::{ClientKind, Event, RexClient};
+use serde_json::Value;
 
 use crate::endpoint::Endpoint;
 use crate::ids::{BlockId, SessionId};
@@ -58,6 +60,24 @@ impl Rex {
         call_timeout: Duration,
         resume: Option<&str>,
     ) -> Result<Self> {
+        Self::open(endpoint, call_timeout, resume, None)
+    }
+
+    /// Connects as for [`Rex::connect`], under a label other clients can find it by.
+    pub fn connect_labelled(
+        endpoint: &Endpoint,
+        call_timeout: Duration,
+        label: &str,
+    ) -> Result<Self> {
+        Self::open(endpoint, call_timeout, None, Some(label))
+    }
+
+    fn open(
+        endpoint: &Endpoint,
+        call_timeout: Duration,
+        resume: Option<&str>,
+        label: Option<&str>,
+    ) -> Result<Self> {
         let transport = transport::connect(endpoint, rexrs::CONTROL_PATH, call_timeout)?;
         let mut builder = RexClient::builder()
             .name("rex-relay")
@@ -66,6 +86,9 @@ impl Rex {
             .api_revisions(MIN_API_REVISION..=API_REVISION);
         if let Some(token) = resume {
             builder = builder.reconnect_token(token);
+        }
+        if let Some(label) = label {
+            builder = builder.label(label);
         }
         let client = builder
             .connect_with(transport)
@@ -334,6 +357,49 @@ impl Rex {
     pub fn destroy(&mut self, session_id: &SessionId) -> Result<()> {
         self.client
             .call(session::Destroy::new(session_id.as_str()))?;
+        Ok(())
+    }
+
+    /// Asks the connected client with this id or label to perform `action`, waiting up to
+    /// `timeout` for its answer. Returns what the action returned.
+    pub fn perform(
+        &mut self,
+        client: &str,
+        action: &str,
+        args: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
+        let clients = self.client.call(client::List::new())?.clients;
+        let Some(target) = clients.iter().find(|c| {
+            c.connection_state.as_deref() != Some("lost")
+                && (c.client_id == client
+                    || c.info.as_ref().and_then(|i| i.label.as_deref()) == Some(client))
+        }) else {
+            bail!(
+                "no client with id or label {client:?} is connected; is `rex-relay host --prototype` running on the Rex host?"
+            );
+        };
+        let request = client::Perform::new(&target.client_id, action)
+            .args(args)
+            .origin("cli")
+            .timeout_ms(timeout.as_millis() as i64);
+        // The server answers only once the other client has, so the call may take the whole
+        // timeout. Allow that plus the usual time for a call.
+        self.set_read_timeout(timeout + self.call_timeout)?;
+        let result = self.client.call(request);
+        self.set_read_timeout(self.call_timeout)?;
+        let performed = result.with_context(|| format!("{action} on {}", target.client_id))?;
+        Ok(performed.result.unwrap_or(Value::Null))
+    }
+
+    /// Answers a `client_perform_requested` event.
+    pub fn reply(&mut self, call_id: &str, answer: Result<Value, ReplyError>) -> Result<()> {
+        let reply = client::Reply::new(call_id);
+        let reply = match answer {
+            Ok(value) => reply.result(value),
+            Err(error) => reply.error(error),
+        };
+        self.client.call(reply)?;
         Ok(())
     }
 

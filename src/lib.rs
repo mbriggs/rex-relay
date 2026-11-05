@@ -8,6 +8,7 @@ pub mod config;
 pub mod endpoint;
 pub mod exit;
 pub mod guard;
+pub mod host;
 pub mod ids;
 pub mod output;
 pub mod pane;
