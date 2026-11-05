@@ -425,9 +425,19 @@ fn list(ctx: &Ctx, out: &Out) -> Result<i32> {
 fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
     let mut rex = ctx.connect()?;
     let located = find(&mut rex, target, false, pane::choose_claude)?;
+    let (sid, bid) = (&located.session.id, &located.pane.block_id);
+    let mut status = located.evidence.records.status();
+    let reading = match status {
+        Status::Idle => Some(prompt::read(&rex.screen_vt(sid, bid)?)),
+        _ => None,
+    };
     rex.close();
-    let status = located.evidence.records.status();
-    let msg = located.evidence.records.msg();
+    let dialog = reading.as_ref().and_then(|r| r.startup_dialog(status));
+    let summary = dialog.map(prompt::Dialog::summary);
+    if dialog.is_some() {
+        status = Status::Dialog;
+    }
+    let msg = summary.as_deref().or(located.evidence.records.msg());
     if out.json {
         out.event(json!({
             "type": "status",
@@ -437,6 +447,8 @@ fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
             "status": status,
             "label": status.label(),
             "msg": msg,
+            "dialog": dialog.map(|d| &d.text),
+            "folder": dialog.and_then(|d| d.folder.as_deref()),
             "program": located.evidence.program(),
             "claude": located.evidence.claude_reason(),
         }));
@@ -760,14 +772,9 @@ impl<'a> Attempt<'a> {
         let (seq, records) = rex.program_status(&sid, &bid)?;
         let initial = records.status();
         guard::check_status_for_send(initial, args.answer)?;
-        if rex.bracketed_paste(&sid, &bid).ok().flatten() == Some(false) {
-            return Err(Refusal(
-                "the pane hasn't turned on bracketed paste, so it isn't at Claude Code's prompt; use --block if this is the wrong pane".into(),
-            )
-            .into());
-        }
         let reading = prompt::read(&rex.screen_vt(&sid, &bid)?);
-        guard::check_screen(reading.screen)?;
+        let paste = rex.bracketed_paste(&sid, &bid).ok().flatten();
+        guard::check_ready(&reading, paste, located.evidence.claude_reason().is_some())?;
         if let Some(input) = reading.input {
             if !args.clear_input {
                 return Err(guard::leftover_input(&input).into());
@@ -1000,7 +1007,7 @@ fn clear_input(rex: &mut Rex, sid: &SessionId, bid: &BlockId) -> Result<()> {
             std::thread::sleep(KEY_DELAY);
         }
         let reading = prompt::read(&rex.screen_vt(sid, bid)?);
-        guard::check_screen(reading.screen)?;
+        guard::check_ready(&reading, None, true)?;
         let Some(input) = reading.input else {
             return Ok(());
         };
@@ -1022,6 +1029,21 @@ fn wait(ctx: &Ctx, out: &Out, args: &WaitArgs) -> Result<i32> {
     let located = find(&mut rex, &args.target, true, pane::choose_claude)?;
     let (sid, bid) = (located.session.id, located.pane.block_id);
     let (seq, records) = rex.program_status(&sid, &bid)?;
+    // A startup dialog leaves the records idle, so only the screen tells it from a ready
+    // prompt. Its text is the message: a person has to read it to answer.
+    if records.status() == Status::Idle
+        && let Some(dialog) = prompt::read(&rex.screen_vt(&sid, &bid)?).startup_dialog(Status::Idle)
+    {
+        let msg = Some(dialog.text.clone());
+        rex.close();
+        return Ok(finish(
+            out,
+            Outcome::Stopped {
+                status: Status::Dialog,
+                msg,
+            },
+        ));
+    }
     let tracker = Tracker::waiting(records.status());
     let pump = Output::new(&args.wait, DEFAULT_HOLDBACK, || rex.read_text(&sid, &bid))?;
     let watch = Watch {
