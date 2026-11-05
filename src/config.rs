@@ -9,6 +9,7 @@ use serde::Deserialize;
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 32 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Names a config file to use instead of the default location.
 pub const CONFIG_ENV: &str = "REX_RELAY_CONFIG";
 /// The endpoint variable that a Rex server sets in its terminals.
@@ -29,6 +30,8 @@ pub struct Config {
     /// How long one call to the server may take before the connection counts as stalled,
     /// such as `10s`. `send` and `wait` then reconnect.
     pub call_timeout: Option<String>,
+    /// How long a command keeps retrying its first connection, such as `60s`. `0s` tries once.
+    pub connect_timeout: Option<String>,
     /// Where the audit log goes. Defaults to `$XDG_STATE_HOME/rex-relay/audit.jsonl`.
     pub audit_log: Option<PathBuf>,
     /// Where the registry of sessions `new` created goes. Defaults to
@@ -65,6 +68,10 @@ impl Config {
                 bail!("call_timeout must be positive");
             }
         }
+        if let Some(timeout) = &self.connect_timeout {
+            humantime::parse_duration(timeout)
+                .with_context(|| format!("invalid connect_timeout {timeout:?}"))?;
+        }
         Ok(())
     }
 
@@ -84,6 +91,13 @@ impl Config {
             .as_deref()
             .and_then(|t| humantime::parse_duration(t).ok())
             .unwrap_or(DEFAULT_CALL_TIMEOUT)
+    }
+
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+            .as_deref()
+            .and_then(|t| humantime::parse_duration(t).ok())
+            .unwrap_or(DEFAULT_CONNECT_TIMEOUT)
     }
 
     pub fn audit_log(&self) -> Result<PathBuf> {
@@ -207,6 +221,7 @@ mod tests {
         assert_eq!(config.max_message_bytes(), 32 * 1024);
         assert_eq!(config.timeout(), Duration::from_secs(1800));
         assert_eq!(config.call_timeout(), Duration::from_secs(10));
+        assert_eq!(config.connect_timeout(), Duration::from_secs(60));
         assert!(config.allowed_endpoints.is_empty());
     }
 
@@ -217,6 +232,7 @@ mod tests {
             "max_message_bytes = 0",
             "timeout = \"soon\"",
             "call_timeout = \"0s\"",
+            "connect_timeout = \"soon\"",
         ] {
             let config: Config = toml::from_str(bad).unwrap();
             assert!(config.validate().is_err(), "{bad}");

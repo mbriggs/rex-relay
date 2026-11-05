@@ -90,6 +90,7 @@ allowed_endpoints = ["https://rex-host.example.ts.net"]
 max_message_bytes = 32768
 timeout = "30m"
 call_timeout = "10s"
+connect_timeout = "60s"
 # audit_log = "~/.local/state/rex-relay/audit.jsonl"
 # registry = "~/.local/state/rex-relay/owned.json"
 ```
@@ -177,6 +178,11 @@ so a new Done counts even when the pane already showed Done before the message.
 
 ### Lost connections
 
+Every command retries its first connection if it can't be made, such as during a network blip.
+It notes each failed attempt on stderr and tries again after 1, 2, 4, and then every 8 seconds.
+After `connect_timeout` (default 60 seconds) it gives up with exit code 16. A server that answers
+but refuses the client, such as for an unsupported API revision, isn't retried.
+
 `send` and `wait` re-read the pane's status every 3 seconds, whether or not events arrive. That
 read catches a missed event. Its round trip also shows whether the connection still works.
 
@@ -230,7 +236,7 @@ and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 | 13 | Needs sign-in: waiting for a login or credential. |
 | 14 | Error: the program reported an error. |
 | 15 | Timeout: still working when `--timeout` ran out. |
-| 16 | Lost connection: the connection to the server broke during `send` or `wait` and couldn't be restored before `--timeout`. Claude Code's state is unknown. |
+| 16 | Lost connection: the first connection failed for `connect_timeout`, or the connection broke during `send` or `wait` and couldn't be restored before `--timeout`. In the second case, Claude Code's state is unknown. |
 
 ## Guard rails
 

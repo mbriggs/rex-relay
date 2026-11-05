@@ -134,8 +134,9 @@ pub fn connect(endpoint: &Endpoint, path: &str, timeout: Duration) -> Result<Tra
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     // The TLS handshake runs lazily on the first read or write, inside the WebSocket handshake.
+    // Keep the rexrs error typed, so a caller can tell a failed handshake from a refusal.
     TungsteniteTransport::handshake(stream, &endpoint.ws_url(path))
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        .map_err(anyhow::Error::new)
         .with_context(|| format!("opening the control connection to {endpoint}"))
 }
 

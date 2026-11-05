@@ -706,6 +706,61 @@ fn send_exits_16_when_the_server_stays_unreachable() {
     assert_eq!(mock.audit().last().unwrap()["result"], "lost_connection");
 }
 
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn the_first_connection_is_retried_through_a_blip() {
+    let mock = demo(vec![record("done", None, None)], AfterEnter::Done);
+    mock.state.lock().unwrap().refuse = 2;
+    let output = mock.rexctl(&["status", "demo"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    let err = stderr(&output);
+    assert!(err.contains("connection attempt 1 to"), "{err}");
+    assert!(err.contains("retrying in 1s"), "{err}");
+    assert!(err.contains("connection attempt 2 to"), "{err}");
+    assert!(err.contains("retrying in 2s"), "{err}");
+    assert!(!err.contains("connection attempt 3"), "{err}");
+    assert_eq!(mock.hellos().len(), 1);
+}
+
+#[test]
+fn an_unreachable_server_exits_16_after_connect_timeout() {
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.write_config_with(&[&mock.endpoint()], "connect_timeout = \"2s\"\n");
+    mock.state.lock().unwrap().refuse = usize::MAX;
+    for args in [
+        &["--json", "status", "demo"][..],
+        &["--json", "send", "demo", "hi"],
+    ] {
+        let started = std::time::Instant::now();
+        let output = mock.rexctl(args);
+        assert_eq!(code(&output), 16, "{args:?}: {output:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let error = &json_lines(&output)[0];
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["exit_code"], 16);
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains("couldn't connect to"), "{message}");
+        // One retry fits in 2s; the next pause wouldn't.
+        assert!(
+            stderr(&output).contains("connection attempt 1 to"),
+            "{output:?}"
+        );
+    }
+    assert!(mock.writes().is_empty());
+    assert!(mock.hellos().is_empty());
+    let audit = mock.audit();
+    assert_eq!(audit.len(), 1, "the failed send is audited");
+    assert!(
+        audit[0]["result"]
+            .as_str()
+            .unwrap()
+            .starts_with("error: couldn't connect")
+    );
+}
+
 #[test]
 fn send_json_reports_needs_approval() {
     let mock = demo(vec![], AfterEnter::Blocked("permission"));

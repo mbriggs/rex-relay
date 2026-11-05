@@ -17,7 +17,7 @@ use crate::output::{DEFAULT_HOLDBACK, Pump};
 use crate::pane::{self, Evidence, Pane};
 use crate::prompt;
 use crate::registry::{Owned, Registry};
-use crate::rex::{self, Rex, Session};
+use crate::rex::{self, Rex, Session, Unreachable};
 use crate::status::{self, Records, Status, Tracker};
 
 /// How often `send` and `wait` re-read the status, events or not. This catches a missed
@@ -33,8 +33,10 @@ pub fn run(cli: &Cli) -> i32 {
     match execute(cli, &out) {
         Ok(code) => code,
         Err(error) => {
-            let code = if error.downcast_ref::<Refusal>().is_some() {
+            let code = if error.is::<Refusal>() {
                 exit::REFUSED
+            } else if error.is::<Unreachable>() {
+                exit::LOST_CONNECTION
             } else {
                 exit::ERROR
             };
@@ -78,8 +80,36 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// Connects, retrying a connection that can't be made, such as during a network blip, for
+    /// up to `connect_timeout`. Each failed attempt is noted on stderr.
     fn connect(&self) -> Result<Rex> {
-        Rex::connect(&self.endpoint, self.config.call_timeout(), None)
+        let started = Instant::now();
+        let patience = self.config.connect_timeout();
+        let mut failures = 0;
+        loop {
+            let error = match Rex::connect(&self.endpoint, self.config.call_timeout(), None) {
+                Ok(rex) => return Ok(rex),
+                Err(error) if rex::is_connection_error(&error) => error,
+                Err(error) => return Err(error),
+            };
+            failures += 1;
+            let pause = rex::backoff(failures);
+            if started.elapsed() + pause > patience {
+                return Err(Unreachable {
+                    endpoint: self.endpoint_key(),
+                    attempts: failures,
+                    waited: started.elapsed(),
+                    last: format!("{error:#}"),
+                }
+                .into());
+            }
+            eprintln!(
+                "rexctl: connection attempt {failures} to {} failed: {error:#}; retrying in {}s",
+                self.endpoint,
+                pause.as_secs()
+            );
+            std::thread::sleep(pause);
+        }
     }
 
     /// The endpoint in canonical form, as the registry and the audit log record it.
@@ -725,7 +755,7 @@ impl<'a> Link<'a> {
 
     fn failed(&mut self) {
         self.failures += 1;
-        self.retry_at = Instant::now() + backoff(self.failures);
+        self.retry_at = Instant::now() + rex::backoff(self.failures);
     }
 
     fn restore(&mut self, rex: Rex) {
@@ -741,11 +771,6 @@ impl<'a> Link<'a> {
             rex.close();
         }
     }
-}
-
-/// The pause after the `failures`th failed reconnect attempt: 1s, 2s, 4s, then 8s.
-fn backoff(failures: u32) -> Duration {
-    Duration::from_secs(1 << failures.saturating_sub(1).min(3))
 }
 
 /// The server said the watched session or pane no longer exists. Reconnecting won't help.

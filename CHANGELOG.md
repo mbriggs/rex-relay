@@ -12,8 +12,11 @@ The first release, under the MIT License.
 - The `rexctl` commands `list`, `status`, `read`, `new`, `send`, `wait`, and `close`, which drive
   Claude Code panes in Rex sessions over control API revision 8.
 - Exit codes for each way Claude Code can stop: done, needs approval, question, needs input,
-  needs sign-in, error, and timeout. Exit code 16 means the connection to the server broke during
+  needs sign-in, error, and timeout. Exit code 16 means the server couldn't be reached: the first
+  connection failed for `connect_timeout` (default 60 seconds), or the connection broke during
   `send` or `wait` and couldn't be restored before `--timeout`.
+- Retries for every command's first connection, with the same backoff as reconnects. Each failed
+  attempt is noted on stderr.
 - Reconnects during `send` and `wait`. A call that fails or takes longer than `call_timeout`
   (default 10 seconds) starts a reconnect. `rexctl` then joins the session again, re-reads the
   pane's status, and keeps waiting, and it never types the message again. The status is also

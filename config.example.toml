@@ -22,6 +22,11 @@ timeout = "30m"
 # connection as stalled. `send` and `wait` then reconnect and keep waiting.
 call_timeout = "10s"
 
+# How long a command keeps retrying its first connection to the server, such
+# as through a network blip, before it gives up with exit code 16. "0s" tries
+# once.
+connect_timeout = "60s"
+
 # Where the audit log goes. Defaults to $XDG_STATE_HOME/rex-relay/audit.jsonl,
 # that is ~/.local/state/rex-relay/audit.jsonl.
 # audit_log = "/home/you/.local/state/rex-relay/audit.jsonl"

@@ -281,13 +281,83 @@ impl Rex {
     }
 }
 
-/// Whether `error` means the connection stalled or broke, as opposed to the server answering
-/// with an error. A watch reconnects after the first kind and stops on the second.
+/// The WebSocket close code a server sends when it refuses the client, such as for sharing no
+/// API revision with it. Retrying can't change the answer.
+const POLICY_VIOLATION: u16 = 1008;
+
+/// Whether `error` means the connection couldn't be made, stalled, or broke, as opposed to the
+/// server answering with an error. Callers retry after the first kind and stop on the second.
 pub fn is_connection_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<rexrs::Error>(),
-            Some(rexrs::Error::TimedOut | rexrs::Error::Transport(_) | rexrs::Error::Closed { .. })
-        ) || cause.downcast_ref::<std::io::Error>().is_some()
+        let retryable = match cause.downcast_ref::<rexrs::Error>() {
+            Some(rexrs::Error::Closed { code, .. }) => *code != Some(POLICY_VIOLATION),
+            Some(rexrs::Error::TimedOut | rexrs::Error::Transport(_)) => true,
+            _ => false,
+        };
+        retryable || cause.downcast_ref::<std::io::Error>().is_some()
     })
+}
+
+/// The pause after the `failures`th failed connection attempt in a row: 1s, 2s, 4s, then 8s.
+pub fn backoff(failures: u32) -> Duration {
+    Duration::from_secs(1 << failures.saturating_sub(1).min(3))
+}
+
+/// The server couldn't be reached within the time allowed. Exits with
+/// [`crate::exit::LOST_CONNECTION`].
+#[derive(Debug)]
+pub struct Unreachable {
+    pub endpoint: String,
+    pub attempts: u32,
+    pub waited: Duration,
+    /// The last attempt's error.
+    pub last: String,
+}
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "couldn't connect to {} in {} attempts over {}s: {}",
+            self.endpoint,
+            self.attempts,
+            self.waited.as_secs(),
+            self.last
+        )
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_up_to_8s() {
+        let pauses: Vec<u64> = (1..=6).map(|n| backoff(n).as_secs()).collect();
+        assert_eq!(pauses, [1, 2, 4, 8, 8, 8]);
+    }
+
+    #[test]
+    fn refusals_by_policy_are_not_retried() {
+        let refused = anyhow::Error::new(rexrs::Error::Closed {
+            code: Some(POLICY_VIOLATION),
+            reason: "no common API revision".into(),
+        });
+        assert!(!is_connection_error(&refused));
+        let dropped = anyhow::Error::new(rexrs::Error::Closed {
+            code: None,
+            reason: String::new(),
+        });
+        assert!(is_connection_error(&dropped));
+        assert!(is_connection_error(&anyhow::Error::new(
+            rexrs::Error::TimedOut
+        )));
+        let io = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(is_connection_error(
+            &anyhow::Error::new(io).context("connecting")
+        ));
+        assert!(!is_connection_error(&anyhow::anyhow!("speaks revision 7")));
+    }
 }
