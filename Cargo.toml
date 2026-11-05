@@ -14,7 +14,7 @@ categories = ["command-line-utilities", "development-tools"]
 publish = false
 
 [[bin]]
-name = "rexctl"
+name = "rex-relay"
 path = "src/main.rs"
 
 [dependencies]

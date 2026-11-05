@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "rexctl",
+    name = "rex-relay",
     version,
     about = "Drive Claude Code panes in Rex sessions, with guard rails",
     after_help = "Exit codes: 0 done/ok, 1 error, 2 usage, 3 refused by a guard rail, \
@@ -34,7 +34,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// List the server's sessions, marking the ones rexctl created.
+    /// List the server's sessions, marking the ones rex-relay created.
     List,
     /// Show sessions, their tabs, and their panes, with what runs in each pane and its status.
     Tree {
@@ -51,9 +51,9 @@ pub enum Command {
         #[arg(long, default_value_t = 100, value_name = "N")]
         lines: usize,
     },
-    /// Create a session that runs Claude Code, and record its id as owned by rexctl.
+    /// Create a session that runs Claude Code, and record its id as owned by rex-relay.
     New {
-        /// The session's initial label. Claude Code may rename the session later; rexctl tracks
+        /// The session's initial label. Claude Code may rename the session later; rex-relay tracks
         /// it by id. Without a label, Rex picks one.
         label: Option<String>,
         /// The directory the pane starts in, on the Rex host.
@@ -74,7 +74,7 @@ pub enum Command {
     /// Type a command into a shell pane idle at its prompt, wait for the prompt to return, and
     /// print the new output.
     Run(RunArgs),
-    /// Close a session that rexctl created. Sessions rexctl didn't create are never closed.
+    /// Close a session that rex-relay created. Sessions rex-relay didn't create are never closed.
     Close {
         /// The session's id (session:…) or current label.
         session: String,
@@ -85,7 +85,7 @@ pub enum Command {
 pub struct Target {
     /// The session, by id (session:…) or current label, optionally followed by a tab and a
     /// pane: session:tab or session:tab:pane, such as solar-creek:shell. Tabs and panes match
-    /// by label, id, or number; see `rexctl tree`.
+    /// by label, id, or number; see `rex-relay tree`.
     #[arg(value_name = "TARGET")]
     pub name: String,
     /// The block to use instead of the one that runs Claude Code: its id, or a unique prefix.
@@ -99,7 +99,7 @@ pub struct SendArgs {
     pub target: Target,
     /// The message. Newlines and tabs are allowed; other control characters are not.
     pub message: String,
-    /// Send to a session rexctl didn't create (one not in the ownership registry).
+    /// Send to a session rex-relay didn't create (one not in the ownership registry).
     #[arg(long)]
     pub allow_foreign: bool,
     /// The message answers a pending approval or question. Without it, send refuses while
@@ -124,7 +124,7 @@ pub struct SendArgs {
 pub struct RunArgs {
     #[command(flatten)]
     pub target: Target,
-    /// Use a session rexctl didn't create (one not in the ownership registry).
+    /// Use a session rex-relay didn't create (one not in the ownership registry).
     #[arg(long)]
     pub allow_foreign: bool,
     /// Lowers the largest command allowed, in bytes, below the config's `max_message_bytes`.

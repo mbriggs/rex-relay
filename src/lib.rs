@@ -1,4 +1,4 @@
-//! `rexctl`: a guarded relay that drives Claude Code panes in Rex sessions over Rex's control
+//! `rex-relay`: a guarded relay that drives Claude Code panes in Rex sessions over Rex's control
 //! API (`GET /api/control`, subprotocol `rex.control.v1`, API revision 8).
 
 pub mod audit;

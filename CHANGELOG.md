@@ -3,14 +3,22 @@
 This project follows [Semantic Versioning](https://semver.org/). Before 1.0, minor releases may
 change the command-line interface.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-04
 
 The first release, under the MIT License.
 
+### Changed
+
+- The command is named `rex-relay`, matching the crate and its config, state, and log paths.
+  During development it was called `rexctl`. Release archives, `install.sh`, and the agent skill
+  (`skills/rex-relay`) use the new name, and `install.sh` reads `REX_RELAY_VERSION`,
+  `REX_RELAY_INSTALL_DIR`, and `REX_RELAY_BASE_URL`. A `rexctl` binary installed earlier isn't
+  removed or updated; delete it by hand.
+
 ### Added
 
-- The `rexctl` commands `list`, `status`, `read`, `new`, `send`, `wait`, and `close`, which drive
-  Claude Code panes in Rex sessions over control API revision 8.
+- The `rex-relay` commands `list`, `tree`, `status`, `read`, `new`, `send`, `wait`, `run`, and
+  `close`, which drive Claude Code and shell panes in Rex sessions over control API revision 8.
 - Exit codes for each way Claude Code can stop: done, needs approval, question, needs input,
   needs sign-in, error, and timeout. Exit code 16 means the server couldn't be reached: the first
   connection failed for `connect_timeout` (default 60 seconds), or the connection broke during
@@ -18,11 +26,11 @@ The first release, under the MIT License.
 - Retries for every command's first connection, with the same backoff as reconnects. Each failed
   attempt is noted on stderr.
 - Reconnects during `send` and `wait`. A call that fails or takes longer than `call_timeout`
-  (default 10 seconds) starts a reconnect. `rexctl` then joins the session again, re-reads the
+  (default 10 seconds) starts a reconnect. `rex-relay` then joins the session again, re-reads the
   pane's status, and keeps waiting, and it never types the message again. The status is also
   re-read every 3 seconds, so a missed Done still ends the wait.
 - `--json`, which prints one JSON object per line.
-- `rexctl run <target> -- <command>`, which types one command line into a shell pane idle at its
+- `rex-relay run <target> -- <command>`, which types one command line into a shell pane idle at its
   prompt and waits for the prompt to return.
 - An ownership registry that tracks the sessions `new` creates by session id. `send` targets
   only owned sessions unless `--allow-foreign`, and `close` closes only owned sessions.
@@ -33,5 +41,5 @@ The first release, under the MIT License.
   rustls.
 - An audit log of every `new`, `send`, and `close`, which records message hashes, never message
   text.
-- An agent skill, `skills/rexctl/SKILL.md`, shipped in release archives.
+- An agent skill, `skills/rex-relay/SKILL.md`, shipped in release archives.
 - A vendored copy of the rexrs client with API revision 8 patches. See `vendor/rexrs/NOTICE`.

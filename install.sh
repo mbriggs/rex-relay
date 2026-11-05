@@ -1,24 +1,24 @@
 #!/bin/sh
-# Installs or updates rexctl from a GitHub release, after checking the download's SHA-256.
+# Installs or updates rex-relay from a GitHub release, after checking the download's SHA-256.
 #
 #   curl -fsSL https://raw.githubusercontent.com/mbriggs/rex-relay/main/install.sh | sh
 #
 # Settings, all optional:
-#   REXCTL_VERSION      a release tag such as v0.1.0 (default: the latest release)
-#   REXCTL_INSTALL_DIR  where to put rexctl (default: ~/.local/bin)
-#   REXCTL_BASE_URL     where to download from instead of GitHub, such as a mirror
+#   REX_RELAY_VERSION      a release tag such as v0.1.0 (default: the latest release)
+#   REX_RELAY_INSTALL_DIR  where to put rex-relay (default: ~/.local/bin)
+#   REX_RELAY_BASE_URL     where to download from instead of GitHub, such as a mirror
 set -eu
 
 repo=mbriggs/rex-relay
-version=${REXCTL_VERSION:-latest}
-dir=${REXCTL_INSTALL_DIR:-$HOME/.local/bin}
+version=${REX_RELAY_VERSION:-latest}
+dir=${REX_RELAY_INSTALL_DIR:-$HOME/.local/bin}
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64 | Linux-amd64) target=x86_64-unknown-linux-musl ;;
   Darwin-arm64 | Darwin-aarch64) target=aarch64-apple-darwin ;;
   Darwin-x86_64) target=x86_64-apple-darwin ;;
   *)
-    echo "rexctl: no prebuilt binary for $(uname -s) $(uname -m)." >&2
+    echo "rex-relay: no prebuilt binary for $(uname -s) $(uname -m)." >&2
     echo "Build it instead: cargo install --locked --git https://github.com/$repo" >&2
     exit 1
     ;;
@@ -29,8 +29,8 @@ if [ "$version" = latest ]; then
 else
   base=https://github.com/$repo/releases/download/$version
 fi
-base=${REXCTL_BASE_URL:-$base}
-name=rexctl-$target
+base=${REX_RELAY_BASE_URL:-$base}
+name=rex-relay-$target
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -43,18 +43,18 @@ else
   check="shasum -a 256 -c"
 fi
 if ! (cd "$tmp" && $check "$name.tar.gz.sha256" >/dev/null 2>&1); then
-  echo "rexctl: the download doesn't match its SHA-256 checksum; nothing was installed." >&2
+  echo "rex-relay: the download doesn't match its SHA-256 checksum; nothing was installed." >&2
   exit 1
 fi
 
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
 mkdir -p "$dir"
-cp "$tmp/$name/rexctl" "$dir/rexctl.new"
-chmod 755 "$dir/rexctl.new"
-mv "$dir/rexctl.new" "$dir/rexctl"
+cp "$tmp/$name/rex-relay" "$dir/rex-relay.new"
+chmod 755 "$dir/rex-relay.new"
+mv "$dir/rex-relay.new" "$dir/rex-relay"
 
-echo "Installed $("$dir/rexctl" --version) to $dir/rexctl"
+echo "Installed $("$dir/rex-relay" --version) to $dir/rex-relay"
 case ":$PATH:" in
   *":$dir:"*) ;;
-  *) echo "$dir isn't on your PATH. Add it to run rexctl by name." ;;
+  *) echo "$dir isn't on your PATH. Add it to run rex-relay by name." ;;
 esac

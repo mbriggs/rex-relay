@@ -2,23 +2,23 @@
 
 ## Threat model
 
-`rexctl` is a client of a Rex server's control API. Anyone who can reach that API can drive the
-server's terminals: type into any pane, read any screen, and create or close sessions. `rexctl`
+`rex-relay` is a client of a Rex server's control API. Anyone who can reach that API can drive the
+server's terminals: type into any pane, read any screen, and create or close sessions. `rex-relay`
 adds nothing to that access and can't take any of it away. Its guard rails limit what a caller
-of `rexctl` can do, such as a bot that relays requests from a chat. They don't protect a Rex
+of `rex-relay` can do, such as a bot that relays requests from a chat. They don't protect a Rex
 server from any other client.
 
 Treat network access to the Rex port as shell access to the Rex host, for the user Rex runs as.
 
 ### What the guard rails cover
 
-- `send` types only plain text, only into sessions `rexctl` created (unless `--allow-foreign`),
+- `send` types only plain text, only into sessions `rex-relay` created (unless `--allow-foreign`),
   and only at Claude Code's input prompt. It never answers a permission prompt or a menu, and it
   never types into a sign-in prompt.
 - `run` types one plain command line, only into a shell idle at its prompt, and only in sessions
-  `rexctl` created (unless `--allow-foreign`).
-- `close` closes only sessions `rexctl` created. No flag overrides that.
-- `rexctl` connects only to endpoints listed in `allowed_endpoints`.
+  `rex-relay` created (unless `--allow-foreign`).
+- `close` closes only sessions `rex-relay` created. No flag overrides that.
+- `rex-relay` connects only to endpoints listed in `allowed_endpoints`.
 - Every `new`, `send`, `run`, and `close` is logged to the audit log, including refused ones.
   The log records a message's or command's SHA-256 and length, never its text.
 
@@ -30,20 +30,20 @@ The README's [guard rails](README.md#guard-rails) section has the details.
   speaks the control API directly.
 - What Claude Code does with a message. A message that `send` delivers is a prompt with the
   full power of that Claude Code session, and Claude Code's own permission settings apply.
-- A caller who can edit `rexctl`'s config, registry, or audit log. Those files are created `0600`
+- A caller who can edit `rex-relay`'s config, registry, or audit log. Those files are created `0600`
   in `0700` directories, so this means the same user or root.
 - What a command does. `run` gives its caller a shell, as the user Rex runs as, in every
-  session `rexctl` created. A caller that may use `run` can do anything that user can.
+  session `rex-relay` created. A caller that may use `run` can do anything that user can.
 - `--allow-foreign`, which lets a caller send to, or run commands in, any session on the
   server. Don't give a caller you don't fully trust a way to pass it.
 
 ## Deploying safely
 
 - Never expose the Rex port to the public internet.
-- If `rexctl` runs on the same machine as Rex, use the Unix socket (`unix://…`) and no TCP
+- If `rex-relay` runs on the same machine as Rex, use the Unix socket (`unix://…`) and no TCP
   listener at all.
-- If `rexctl` runs on another machine, put both on a tailnet and publish Rex with Tailscale
-  Serve, so `rexctl` connects with `https://`. Then write tailnet ACLs that let only the relay's
+- If `rex-relay` runs on another machine, put both on a tailnet and publish Rex with Tailscale
+  Serve, so `rex-relay` connects with `https://`. Then write tailnet ACLs that let only the relay's
   machine reach the Rex machine's port. Tag the relay machine, such as `tag:rex-relay`, and grant
   that tag access to the Rex machine. Grant nothing broader.
 - If you use Rex's built-in Tailscale, check its `allow_tailnet_members` setting. When it's off,
@@ -56,7 +56,6 @@ The README's [guard rails](README.md#guard-rails) section has the details.
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately through GitHub's
-[private vulnerability reporting](https://github.com/mbriggs/rex-relay/security/advisories/new)
-for this repository. Don't open a public issue. Include the `rexctl` version, the command you ran,
-and what happened.
+Report vulnerabilities privately through GitHub's [private vulnerability
+reporting](https://github.com/mbriggs/rex-relay/security/advisories/new) for this repository. Don't
+open a public issue. Include the `rex-relay` version, the command you ran, and what happened.

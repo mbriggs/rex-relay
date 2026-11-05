@@ -1,6 +1,6 @@
 name: Release
 
-# Builds prebuilt rexctl binaries for a version tag and publishes them, with checksums, as a
+# Builds prebuilt rex-relay binaries for a version tag and publishes them, with checksums, as a
 # GitHub release. Push a tag that matches Cargo.toml's version, such as v0.1.0.
 on:
   push:
@@ -39,16 +39,16 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name="rexctl-${{ matrix.target }}"
+          name="rex-relay-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/rexctl" LICENSE README.md CHANGELOG.md "dist/$name/"
+          cp "target/${{ matrix.target }}/release/rex-relay" LICENSE README.md CHANGELOG.md "dist/$name/"
           mkdir -p "dist/$name/skills"
-          cp -R skills/rexctl "dist/$name/skills/"
+          cp -R skills/rex-relay "dist/$name/skills/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
       - uses: actions/upload-artifact@v4
         with:
-          name: rexctl-${{ matrix.target }}
+          name: rex-relay-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.sha256

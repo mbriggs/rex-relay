@@ -61,7 +61,7 @@ impl Rex {
         let revision = client.welcome().api_revision;
         if revision < STATUS_API_REVISION {
             bail!(
-                "{endpoint} speaks control API revision {revision}; rexctl needs revision {STATUS_API_REVISION} for program status"
+                "{endpoint} speaks control API revision {revision}; rex-relay needs revision {STATUS_API_REVISION} for program status"
             );
         }
         Ok(Rex {

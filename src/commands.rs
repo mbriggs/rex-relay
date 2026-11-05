@@ -50,7 +50,7 @@ pub fn run(cli: &Cli) -> i32 {
                     json!({"type": "error", "message": format!("{error:#}"), "exit_code": code}),
                 );
             } else {
-                eprintln!("rexctl: {error:#}");
+                eprintln!("rex-relay: {error:#}");
             }
             code
         }
@@ -73,7 +73,7 @@ impl Out {
     }
 
     fn note(&self, text: &str) {
-        eprintln!("rexctl: {text}");
+        eprintln!("rex-relay: {text}");
     }
 }
 
@@ -109,7 +109,7 @@ impl Ctx {
                 .into());
             }
             eprintln!(
-                "rexctl: connection attempt {failures} to {} failed: {error:#}; retrying in {}s",
+                "rex-relay: connection attempt {failures} to {} failed: {error:#}; retrying in {}s",
                 self.endpoint,
                 pause.as_secs()
             );
@@ -607,7 +607,7 @@ enum Closed {
     AlreadyGone,
 }
 
-/// Closes `wanted` if, and only if, the registry says rexctl created it on this endpoint.
+/// Closes `wanted` if, and only if, the registry says rex-relay created it on this endpoint.
 /// The ownership check happens before any close request is sent.
 fn close_owned(ctx: &Ctx, wanted: &str, entry: &mut Entry) -> Result<Closed> {
     let mut rex = ctx.connect()?;

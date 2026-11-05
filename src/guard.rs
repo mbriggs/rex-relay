@@ -96,7 +96,7 @@ pub fn check_send_owned(
         return Ok(());
     }
     refuse(format!(
-        "session {label:?} ({session}) wasn't created by rexctl on this endpoint; pass --allow-foreign to use it anyway"
+        "session {label:?} ({session}) wasn't created by rex-relay on this endpoint; pass --allow-foreign to use it anyway"
     ))
 }
 
@@ -106,7 +106,7 @@ pub fn check_close_owned(owned: bool, session: &str, label: &str) -> Result<(), 
         return Ok(());
     }
     refuse(format!(
-        "session {label:?} ({session}) wasn't created by rexctl on this endpoint; rexctl never closes foreign sessions"
+        "session {label:?} ({session}) wasn't created by rex-relay on this endpoint; rex-relay never closes foreign sessions"
     ))
 }
 
@@ -116,7 +116,7 @@ pub fn check_close_owned(owned: bool, session: &str, label: &str) -> Result<(), 
 pub fn check_status_for_send(status: Status, answer: bool) -> Result<(), Refusal> {
     match status {
         Status::NeedsSignIn => refuse(
-            "the program is waiting for a sign-in; rexctl never types into credential prompts",
+            "the program is waiting for a sign-in; rex-relay never types into credential prompts",
         ),
         Status::NeedsApproval | Status::Question if !answer => refuse(format!(
             "the program is in {:?}; pass --answer if this message is meant as the answer",
@@ -132,7 +132,7 @@ pub fn check_screen(screen: Screen) -> Result<(), Refusal> {
     match screen {
         Screen::Prompt => Ok(()),
         Screen::Menu => refuse(
-            "the pane shows a menu (such as the folder-trust or a permission dialog), not Claude Code's input prompt; rexctl never picks menu options",
+            "the pane shows a menu (such as the folder-trust or a permission dialog), not Claude Code's input prompt; rex-relay never picks menu options",
         ),
         Screen::Unknown => refuse(
             "the pane isn't at Claude Code's input prompt; use --block if this is the wrong pane",

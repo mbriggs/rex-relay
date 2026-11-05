@@ -1,4 +1,4 @@
-//! The sessions `rexctl new` created: `~/.local/state/rex-relay/owned.json`.
+//! The sessions `rex-relay new` created: `~/.local/state/rex-relay/owned.json`.
 //!
 //! Ownership is by session id and endpoint, never by label: Claude Code renames the sessions it
 //! runs in, so a label proves nothing. `send` targets only owned sessions (unless told
@@ -66,7 +66,7 @@ impl Registry {
             .with_context(|| format!("parsing the ownership registry {}", self.path.display()))?;
         if contents.version != VERSION {
             bail!(
-                "{} has version {}; this rexctl reads version {VERSION}",
+                "{} has version {}; this rex-relay reads version {VERSION}",
                 self.path.display(),
                 contents.version
             );

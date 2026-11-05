@@ -1,4 +1,4 @@
-//! End-to-end tests of `rexctl` against a scripted, in-process stand-in for a Rex server's
+//! End-to-end tests of `rex-relay` against a scripted, in-process stand-in for a Rex server's
 //! control endpoint. Nothing here contacts a real server.
 
 use std::net::TcpListener;
@@ -212,9 +212,9 @@ impl Mock {
         self.state.lock().unwrap().hellos.clone()
     }
 
-    fn rexctl(&self, args: &[&str]) -> Output {
+    fn cli(&self, args: &[&str]) -> Output {
         let endpoint = self.endpoint();
-        rexctl(self.dir.path(), &self.config_path(), &endpoint, args)
+        cli(self.dir.path(), &self.config_path(), &endpoint, args)
     }
 
     fn writes(&self) -> Vec<(String, String, String)> {
@@ -235,7 +235,7 @@ impl Mock {
         session.1 = label.to_owned();
     }
 
-    /// The endpoint as rexctl records it in the registry.
+    /// The endpoint as rex-relay records it in the registry.
     fn canonical_endpoint(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
@@ -244,7 +244,7 @@ impl Mock {
         Registry::new(self.dir.path().join("xdg-state/rex-relay/owned.json"))
     }
 
-    /// Records a session as created by rexctl on this mock's endpoint.
+    /// Records a session as created by rex-relay on this mock's endpoint.
     fn own(&self, session_id: &str, purpose: Option<&str>) {
         self.registry()
             .add(Owned {
@@ -277,8 +277,8 @@ impl Mock {
     }
 }
 
-fn rexctl(home: &Path, config: &Path, endpoint: &str, args: &[&str]) -> Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_rexctl"))
+fn cli(home: &Path, config: &Path, endpoint: &str, args: &[&str]) -> Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_rex-relay"))
         .arg("--config")
         .arg(config)
         .arg("--endpoint")
@@ -680,7 +680,7 @@ fn demo(records: Vec<Value>, after: AfterEnter) -> Mock {
 #[test]
 fn send_pastes_streams_and_exits_done() {
     let mock = demo(vec![record("done", None, None)], AfterEnter::Done);
-    let output = mock.rexctl(&["send", "demo", "fix the bug\nplease", "--poll", "100ms"]);
+    let output = mock.cli(&["send", "demo", "fix the bug\nplease", "--poll", "100ms"]);
     assert_eq!(code(&output), 0, "{output:?}");
     let text = stdout(&output);
     assert!(text.contains("● Fixed it."), "{text}");
@@ -723,7 +723,7 @@ fn send_pastes_streams_and_exits_done() {
 
 /// `send` with JSON output, waiting at most `timeout`.
 fn send_json(mock: &Mock, timeout: &str) -> (Output, Vec<Value>) {
-    let output = mock.rexctl(&[
+    let output = mock.cli(&[
         "--json",
         "send",
         "demo",
@@ -860,7 +860,7 @@ fn stderr(output: &Output) -> String {
 fn the_first_connection_is_retried_through_a_blip() {
     let mock = demo(vec![record("done", None, None)], AfterEnter::Done);
     mock.state.lock().unwrap().refuse = 2;
-    let output = mock.rexctl(&["status", "demo"]);
+    let output = mock.cli(&["status", "demo"]);
     assert_eq!(code(&output), 0, "{output:?}");
     let err = stderr(&output);
     assert!(err.contains("connection attempt 1 to"), "{err}");
@@ -881,7 +881,7 @@ fn an_unreachable_server_exits_16_after_connect_timeout() {
         &["--json", "send", "demo", "hi"],
     ] {
         let started = std::time::Instant::now();
-        let output = mock.rexctl(args);
+        let output = mock.cli(args);
         assert_eq!(code(&output), 16, "{args:?}: {output:?}");
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         let error = &json_lines(&output)[0];
@@ -910,19 +910,19 @@ fn an_unreachable_server_exits_16_after_connect_timeout() {
 #[test]
 fn quiet_prints_only_the_tail_and_the_final_status() {
     let mock = demo(vec![], AfterEnter::Done);
-    let output = mock.rexctl(&["send", "demo", "fix the bug", "--quiet", "--lines", "6"]);
+    let output = mock.cli(&["send", "demo", "fix the bug", "--quiet", "--lines", "6"]);
     assert_eq!(code(&output), 0, "{output:?}");
     // The final screen's last 6 lines, and nothing streamed before them.
     let mut tail = vec!["  Updated src/lib.rs", ""];
     tail.extend(&BOX);
     assert_eq!(stdout(&output), format!("{}\n", tail.join("\n")));
-    assert_eq!(stderr(&output), "rexctl: Done\n");
+    assert_eq!(stderr(&output), "rex-relay: Done\n");
 
-    let output = mock.rexctl(&["wait", "demo", "--quiet", "--lines", "1"]);
+    let output = mock.cli(&["wait", "demo", "--quiet", "--lines", "1"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(stdout(&output), format!("{}\n", BOX[3]));
 
-    let output = mock.rexctl(&["--json", "send", "demo", "go", "--quiet", "--lines", "2"]);
+    let output = mock.cli(&["--json", "send", "demo", "go", "--quiet", "--lines", "2"]);
     let events = json_lines(&output);
     assert!(events.iter().all(|e| e["type"] != "output"), "{events:?}");
     let tail = events.iter().find(|e| e["type"] == "tail").unwrap();
@@ -933,7 +933,7 @@ fn quiet_prints_only_the_tail_and_the_final_status() {
 #[test]
 fn send_json_reports_needs_approval() {
     let mock = demo(vec![], AfterEnter::Blocked("permission"));
-    let output = mock.rexctl(&["--json", "send", "demo", "run the tests", "--poll", "100ms"]);
+    let output = mock.cli(&["--json", "send", "demo", "run the tests", "--poll", "100ms"]);
     assert_eq!(code(&output), 10, "{output:?}");
     let events = json_lines(&output);
     assert_eq!(events[0]["type"], "sent");
@@ -960,7 +960,7 @@ fn send_json_reports_needs_approval() {
 fn send_exit_codes_for_question_and_sign_in() {
     for (kind, exit) in [("question", 11), ("auth", 13)] {
         let mock = demo(vec![], AfterEnter::Blocked(kind));
-        let output = mock.rexctl(&["send", "demo", "go", "--quiet"]);
+        let output = mock.cli(&["send", "demo", "go", "--quiet"]);
         assert_eq!(code(&output), exit, "{kind}: {output:?}");
     }
 }
@@ -968,7 +968,7 @@ fn send_exit_codes_for_question_and_sign_in() {
 #[test]
 fn send_times_out() {
     let mock = demo(vec![], AfterEnter::KeepWorking);
-    let output = mock.rexctl(&[
+    let output = mock.cli(&[
         "--json",
         "send",
         "demo",
@@ -988,7 +988,7 @@ fn send_times_out() {
 #[test]
 fn send_refuses_foreign_sessions() {
     let mock = demo(vec![], AfterEnter::Done);
-    let output = mock.rexctl(&["send", "work", "hello"]);
+    let output = mock.cli(&["send", "work", "hello"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("--allow-foreign"));
     assert!(mock.writes().is_empty());
@@ -996,7 +996,7 @@ fn send_refuses_foreign_sessions() {
     assert_eq!(audit.len(), 1);
     assert!(audit[0]["result"].as_str().unwrap().starts_with("refused:"));
 
-    let output = mock.rexctl(&["send", "work", "hello", "--allow-foreign", "--quiet"]);
+    let output = mock.cli(&["send", "work", "hello", "--allow-foreign", "--quiet"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(mock.writes().len(), 2);
 }
@@ -1009,7 +1009,7 @@ fn ownership_follows_the_session_id_not_the_label() {
     mock.rename(SID, "Fix the flaky CI job");
     mock.rename(FOREIGN, "demo");
 
-    let output = mock.rexctl(&["send", "demo", "hello"]);
+    let output = mock.cli(&["send", "demo", "hello"]);
     assert_eq!(code(&output), 3, "lookalike label: {output:?}");
     assert!(mock.writes().is_empty());
     assert!(
@@ -1017,9 +1017,9 @@ fn ownership_follows_the_session_id_not_the_label() {
         "refused before attaching"
     );
 
-    let output = mock.rexctl(&["send", "Fix the flaky CI job", "hello", "--quiet"]);
+    let output = mock.cli(&["send", "Fix the flaky CI job", "hello", "--quiet"]);
     assert_eq!(code(&output), 0, "current label resolves: {output:?}");
-    let output = mock.rexctl(&["send", SID, "hello again", "--quiet"]);
+    let output = mock.cli(&["send", SID, "hello again", "--quiet"]);
     assert_eq!(code(&output), 0, "id resolves: {output:?}");
     assert!(mock.writes().iter().all(|(sid, ..)| sid == SID));
 
@@ -1039,7 +1039,7 @@ fn ownership_follows_the_session_id_not_the_label() {
             purpose: None,
         })
         .unwrap();
-    let output = other.rexctl(&["send", SID, "hello"]);
+    let output = other.cli(&["send", SID, "hello"]);
     assert_eq!(code(&output), 3, "{output:?}");
 }
 
@@ -1052,7 +1052,7 @@ fn ambiguous_labels_are_an_error() {
         &["close", "demo"],
         &["send", "demo", "hi", "--allow-foreign"],
     ] {
-        let output = mock.rexctl(args);
+        let output = mock.cli(args);
         assert_eq!(code(&output), 1, "{args:?}: {output:?}");
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("more than one session"),
@@ -1069,18 +1069,18 @@ fn close_closes_owned_sessions_only() {
 
     // Foreign sessions are never closed, and the refusal sends no close request.
     for args in [&["close", "work"][..], &["close", FOREIGN]] {
-        let output = mock.rexctl(args);
+        let output = mock.cli(args);
         assert_eq!(code(&output), 3, "{args:?}: {output:?}");
         assert!(String::from_utf8_lossy(&output.stderr).contains("never closes"));
     }
-    let output = mock.rexctl(&["close", "work", "--allow-foreign"]);
+    let output = mock.cli(&["close", "work", "--allow-foreign"]);
     assert_eq!(code(&output), 2, "close has no override: {output:?}");
     assert!(!mock.methods().contains(&"session.destroy".to_owned()));
     assert!(mock.state.lock().unwrap().sessions.len() == 2);
 
     // An owned session, under its current label.
     mock.rename(SID, "Renamed by Claude");
-    let output = mock.rexctl(&["--json", "close", "Renamed by Claude"]);
+    let output = mock.cli(&["--json", "close", "Renamed by Claude"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(json_lines(&output)[0]["session_id"], SID);
     assert_eq!(
@@ -1114,7 +1114,7 @@ fn close_closes_owned_sessions_only() {
     assert_eq!(audit[2]["session_label"], "Renamed by Claude");
 
     // Gone from both the server and the registry: there is nothing left to close.
-    let output = mock.rexctl(&["close", SID]);
+    let output = mock.cli(&["close", SID]);
     assert_eq!(code(&output), 1, "{output:?}");
 }
 
@@ -1122,7 +1122,7 @@ fn close_closes_owned_sessions_only() {
 fn close_forgets_owned_sessions_that_are_already_gone() {
     let mock = demo(vec![], AfterEnter::Done);
     mock.own("session:0000-vanished", None);
-    let output = mock.rexctl(&["close", "session:0000-vanished"]);
+    let output = mock.cli(&["close", "session:0000-vanished"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(mock.owned_ids(), [SID]);
     assert!(!mock.methods().contains(&"session.destroy".to_owned()));
@@ -1137,7 +1137,7 @@ fn a_corrupt_registry_fails_closed() {
     let mock = demo(vec![], AfterEnter::Done);
     std::fs::write(mock.registry().path(), "{oops").unwrap();
     for args in [&["send", "demo", "hi"][..], &["close", "demo"], &["list"]] {
-        let output = mock.rexctl(args);
+        let output = mock.cli(args);
         assert_eq!(code(&output), 1, "{args:?}: {output:?}");
     }
     assert!(mock.writes().is_empty());
@@ -1150,17 +1150,17 @@ fn send_refuses_pending_prompts_without_answer() {
         vec![record("blocked", Some("question"), Some("Which file?"))],
         AfterEnter::Done,
     );
-    let output = mock.rexctl(&["send", "demo", "src/lib.rs"]);
+    let output = mock.cli(&["send", "demo", "src/lib.rs"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(mock.writes().is_empty());
-    let output = mock.rexctl(&["send", "demo", "src/lib.rs", "--answer", "--quiet"]);
+    let output = mock.cli(&["send", "demo", "src/lib.rs", "--answer", "--quiet"]);
     assert_eq!(code(&output), 0, "{output:?}");
 
     let mock = demo(
         vec![record("blocked", Some("auth"), None)],
         AfterEnter::Done,
     );
-    let output = mock.rexctl(&["send", "demo", "hunter2", "--answer"]);
+    let output = mock.cli(&["send", "demo", "hunter2", "--answer"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(mock.writes().is_empty());
 }
@@ -1188,7 +1188,7 @@ fn send_refuses_menus_like_the_trust_dialog() {
         &["send", "demo", "fix the bug"][..],
         &["send", "demo", "1", "--answer"],
     ] {
-        let output = mock.rexctl(args);
+        let output = mock.cli(args);
         assert_eq!(code(&output), 3, "{args:?}: {output:?}");
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("never picks menu options"),
@@ -1207,7 +1207,7 @@ fn send_refuses_menus_like_the_trust_dialog() {
 
     // A shell prompt isn't Claude Code's either.
     mock.state.lock().unwrap().screen = vec!["$ ls".into(), "src".into(), "$".into()];
-    let output = mock.rexctl(&["send", "demo", "hello"]);
+    let output = mock.cli(&["send", "demo", "hello"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(mock.writes().is_empty());
 }
@@ -1216,7 +1216,7 @@ fn send_refuses_menus_like_the_trust_dialog() {
 fn send_refuses_leftover_input_unless_told_to_clear_it() {
     let mock = demo(vec![], AfterEnter::Done);
     mock.state.lock().unwrap().input = "half a thought".into();
-    let output = mock.rexctl(&["send", "demo", "fix the bug", "--quiet"]);
+    let output = mock.cli(&["send", "demo", "fix the bug", "--quiet"]);
     assert_eq!(code(&output), 3, "{output:?}");
     let err = stderr(&output);
     assert!(err.contains("14 characters of unsent text"), "{err}");
@@ -1226,7 +1226,7 @@ fn send_refuses_leftover_input_unless_told_to_clear_it() {
     let raw = std::fs::read_to_string(mock.audit_path()).unwrap();
     assert!(!raw.contains("half a thought"), "{raw}");
 
-    let output = mock.rexctl(&["send", "demo", "fix the bug", "--quiet", "--clear-input"]);
+    let output = mock.cli(&["send", "demo", "fix the bug", "--quiet", "--clear-input"]);
     assert_eq!(code(&output), 0, "{output:?}");
     let keys: Vec<String> = mock.writes().into_iter().map(|w| w.2).collect();
     assert_eq!(
@@ -1247,7 +1247,7 @@ fn the_placeholder_isnt_leftover_input() {
         let at = state.screen.iter().position(|l| l == BOX[1]).unwrap();
         state.screen[at] = "│ > \x1b[2mTry \"fix lint errors\"\x1b[0m │".into();
     }
-    let output = mock.rexctl(&["send", "demo", "hello", "--quiet"]);
+    let output = mock.cli(&["send", "demo", "hello", "--quiet"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(mock.writes().len(), 2, "no clearing keys");
 }
@@ -1260,7 +1260,7 @@ fn clear_input_never_types_outside_the_prompt() {
         " ❯ 1. Yes, proceed".into(),
         "   2. No, exit".into(),
     ];
-    let output = mock.rexctl(&["send", "demo", "hi", "--clear-input"]);
+    let output = mock.cli(&["send", "demo", "hi", "--clear-input"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(mock.writes().is_empty());
 
@@ -1271,7 +1271,7 @@ fn clear_input_never_types_outside_the_prompt() {
         state.input = "stuck".into();
         state.sticky_input = true;
     }
-    let output = mock.rexctl(&["send", "demo", "hi", "--clear-input"]);
+    let output = mock.cli(&["send", "demo", "hi", "--clear-input"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(stderr(&output).contains("couldn't clear"), "{output:?}");
     let writes = mock.writes();
@@ -1286,16 +1286,16 @@ fn clear_input_never_types_outside_the_prompt() {
 fn send_rejects_bad_messages_before_writing() {
     let mock = demo(vec![], AfterEnter::Done);
     for message in ["up\x1b[A", "a\rb", "\x03"] {
-        let output = mock.rexctl(&["send", "demo", message]);
+        let output = mock.cli(&["send", "demo", message]);
         assert_eq!(code(&output), 3, "{message:?}: {output:?}");
     }
     let big = "x".repeat(40 * 1024);
-    let output = mock.rexctl(&["send", "demo", &big]);
+    let output = mock.cli(&["send", "demo", &big]);
     assert_eq!(code(&output), 3);
-    let output = mock.rexctl(&["send", "demo", "four", "--max-bytes", "3"]);
+    let output = mock.cli(&["send", "demo", "four", "--max-bytes", "3"]);
     assert_eq!(code(&output), 3);
     // --max-bytes can only lower the configured limit.
-    let output = mock.rexctl(&["send", "demo", &big, "--max-bytes", "1000000"]);
+    let output = mock.cli(&["send", "demo", &big, "--max-bytes", "1000000"]);
     assert_eq!(code(&output), 3);
     assert!(mock.writes().is_empty());
     let audit = mock.audit();
@@ -1312,7 +1312,7 @@ fn endpoints_outside_the_allowlist_are_never_contacted() {
     let mock = demo(vec![], AfterEnter::Done);
     mock.write_config(&["https://rex-host.example.ts.net"]);
     for args in [&["list"][..], &["send", "demo", "hi"]] {
-        let output = mock.rexctl(args);
+        let output = mock.cli(args);
         assert_eq!(code(&output), 3, "{args:?}: {output:?}");
     }
     assert_eq!(mock.connections.load(Ordering::SeqCst), 0);
@@ -1331,7 +1331,7 @@ fn the_endpoint_comes_from_rex_server_or_config() {
             ),
         )
         .unwrap();
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_rexctl"));
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_rex-relay"));
         command
             .arg("--config")
             .arg(mock.config_path())
@@ -1358,20 +1358,20 @@ fn wait_returns_the_current_stop_status() {
         (vec![record("error", None, Some("crashed"))], 14),
     ] {
         let mock = demo(records, AfterEnter::Done);
-        let output = mock.rexctl(&["wait", "demo", "--quiet"]);
+        let output = mock.cli(&["wait", "demo", "--quiet"]);
         assert_eq!(code(&output), exit, "{output:?}");
         assert!(mock.writes().is_empty());
         assert!(mock.audit().is_empty(), "wait is read-only");
     }
     let mock = demo(vec![record("working", None, None)], AfterEnter::Done);
-    let output = mock.rexctl(&["wait", "demo", "--timeout", "1s"]);
+    let output = mock.cli(&["wait", "demo", "--timeout", "1s"]);
     assert_eq!(code(&output), 15, "{output:?}");
 }
 
 #[test]
 fn new_creates_a_session_and_audits() {
     let mock = demo(vec![], AfterEnter::Done);
-    let output = mock.rexctl(&[
+    let output = mock.cli(&[
         "--json",
         "new",
         "fix-ci",
@@ -1423,19 +1423,19 @@ fn new_creates_a_session_and_audits() {
     assert_eq!(audit[0]["result"], "created");
     assert_eq!(audit[0]["session"], "session:new");
 
-    let again = mock.rexctl(&["new", "fix-ci"]);
+    let again = mock.cli(&["new", "fix-ci"]);
     assert_eq!(code(&again), 3, "duplicate label: {again:?}");
-    let bad = mock.rexctl(&["new", "x", "--purpose", "two\nlines"]);
+    let bad = mock.cli(&["new", "x", "--purpose", "two\nlines"]);
     assert_eq!(code(&bad), 3, "{bad:?}");
-    let bad = mock.rexctl(&["new", "y", "--cmd", "claude 'unclosed"]);
+    let bad = mock.cli(&["new", "y", "--cmd", "claude 'unclosed"]);
     assert_eq!(code(&bad), 2, "{bad:?}");
     assert_eq!(mock.state.lock().unwrap().created.len(), 1);
 
-    // Sessions rexctl created can be sent to and closed, whatever Claude Code renames them.
+    // Sessions rex-relay created can be sent to and closed, whatever Claude Code renames them.
     mock.rename("session:new", "CI pipeline fix");
-    let output = mock.rexctl(&["send", "CI pipeline fix", "go", "--quiet"]);
+    let output = mock.cli(&["send", "CI pipeline fix", "go", "--quiet"]);
     assert_eq!(code(&output), 0, "{output:?}");
-    let output = mock.rexctl(&["close", "session:new"]);
+    let output = mock.cli(&["close", "session:new"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert!(
         mock.registry()
@@ -1448,7 +1448,7 @@ fn new_creates_a_session_and_audits() {
 #[test]
 fn new_without_a_label_lets_rex_name_the_session() {
     let mock = demo(vec![], AfterEnter::Done);
-    let output = mock.rexctl(&["new", "--cwd", "/srv/app"]);
+    let output = mock.cli(&["new", "--cwd", "/srv/app"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(stdout(&output), "session:new\t\tblock:new\n");
     let created = mock.state.lock().unwrap().created.clone();
@@ -1478,7 +1478,7 @@ fn list_status_and_read() {
         AfterEnter::Done,
     );
 
-    let output = mock.rexctl(&["--json", "list"]);
+    let output = mock.cli(&["--json", "list"]);
     assert_eq!(code(&output), 0, "{output:?}");
     let sessions = json_lines(&output);
     assert_eq!(sessions.len(), 2);
@@ -1492,14 +1492,14 @@ fn list_status_and_read() {
     // Ownership is shown by id, so a renamed session stays marked and a lookalike isn't.
     mock.rename(SID, "Renamed");
     mock.rename(FOREIGN, "lookalike");
-    let output = mock.rexctl(&["list"]);
+    let output = mock.cli(&["list"]);
     assert_eq!(
         stdout(&output),
         format!("* {SID}\tRenamed\tdemo the relay\n  {FOREIGN}\tlookalike\n")
     );
     mock.rename(SID, "demo");
 
-    let output = mock.rexctl(&["--json", "status", "demo"]);
+    let output = mock.cli(&["--json", "status", "demo"]);
     assert_eq!(code(&output), 0, "{output:?}");
     let status = &json_lines(&output)[0];
     assert_eq!(status["block_id"], claude(vec![]).id);
@@ -1507,13 +1507,13 @@ fn list_status_and_read() {
     assert_eq!(status["msg"], "Editing files");
     assert_eq!(status["program"], "claude");
 
-    let output = mock.rexctl(&["status", SID]);
+    let output = mock.cli(&["status", SID]);
     assert!(
         stdout(&output).contains("Working — Editing files"),
         "{output:?}"
     );
 
-    let output = mock.rexctl(&["read", "demo", "--lines", "2"]);
+    let output = mock.cli(&["read", "demo", "--lines", "2"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(stdout(&output), format!("{}\n{}\n", BOX[2], BOX[3]));
 }
@@ -1524,7 +1524,7 @@ fn tree_shows_tabs_panes_and_status() {
         vec![record("working", None, Some("Editing files"))],
         AfterEnter::Done,
     );
-    let output = mock.rexctl(&["--json", "tree"]);
+    let output = mock.cli(&["--json", "tree"]);
     assert_eq!(code(&output), 0, "{output:?}");
     let sessions = json_lines(&output);
     assert_eq!(sessions.len(), 2);
@@ -1545,7 +1545,7 @@ fn tree_shows_tabs_panes_and_status() {
     assert_eq!(panes[1]["status"], "working");
     assert_eq!(panes[1]["msg"], "Editing files");
 
-    let output = mock.rexctl(&["tree", "demo"]);
+    let output = mock.cli(&["tree", "demo"]);
     let text = stdout(&output);
     assert!(
         text.starts_with(&format!("* demo  {SID}  (demo the relay)\n")),
@@ -1566,7 +1566,7 @@ fn tree_shows_tabs_panes_and_status() {
 fn targets_name_tabs_and_panes() {
     let mock = demo(vec![record("done", None, None)], AfterEnter::Done);
     let block_of = |target: &str| {
-        let output = mock.rexctl(&["--json", "status", target]);
+        let output = mock.cli(&["--json", "status", target]);
         assert_eq!(code(&output), 0, "{target}: {output:?}");
         json_lines(&output)[0]["block_id"]
             .as_str()
@@ -1584,7 +1584,7 @@ fn targets_name_tabs_and_panes() {
     assert_eq!(block_of(&format!("{SID}:1:2")), claude_id);
     assert_eq!(block_of("demo"), claude_id);
 
-    let output = mock.rexctl(&["status", "demo:nowhere"]);
+    let output = mock.cli(&["status", "demo:nowhere"]);
     assert_eq!(code(&output), 1, "{output:?}");
     assert!(
         stderr(&output).contains("no tab or terminal pane"),
@@ -1592,14 +1592,14 @@ fn targets_name_tabs_and_panes() {
     );
 
     // Ownership is still per session: a pane in a foreign session is refused.
-    let output = mock.rexctl(&["send", "work:main:claude", "hi"]);
+    let output = mock.cli(&["send", "work:main:claude", "hi"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(stderr(&output).contains("--allow-foreign"), "{output:?}");
     // The named shell pane isn't at Claude Code's prompt, so send refuses it.
-    let output = mock.rexctl(&["send", "demo:shell", "hi"]);
+    let output = mock.cli(&["send", "demo:shell", "hi"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(mock.writes().is_empty());
-    let output = mock.rexctl(&["send", "demo:claude", "hi", "--quiet"]);
+    let output = mock.cli(&["send", "demo:claude", "hi", "--quiet"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert!(mock.writes().iter().all(|w| w.1 == claude_id));
 }
@@ -1615,7 +1615,7 @@ fn shell_demo() -> Mock {
 fn run_types_into_an_idle_shell_and_prints_the_new_output() {
     let mock = shell_demo();
     mock.state.lock().unwrap().busy_after_enter = 3;
-    let output = mock.rexctl(&["run", "demo", "--", "cargo", "test", "--quiet"]);
+    let output = mock.cli(&["run", "demo", "--", "cargo", "test", "--quiet"]);
     assert_eq!(code(&output), 0, "{output:?}");
     // The session's idle shell, not its Claude Code pane.
     let shell_id = shell().id;
@@ -1632,7 +1632,7 @@ fn run_types_into_an_idle_shell_and_prints_the_new_output() {
         "{text}"
     );
     assert!(!text.contains("src"), "the baseline isn't repeated: {text}");
-    assert!(stderr(&output).ends_with("rexctl: Done\n"), "{output:?}");
+    assert!(stderr(&output).ends_with("rex-relay: Done\n"), "{output:?}");
 
     let audit = mock.audit();
     assert_eq!(audit.len(), 2);
@@ -1644,7 +1644,7 @@ fn run_types_into_an_idle_shell_and_prints_the_new_output() {
     assert_eq!(audit[1]["result"], "done");
 
     // --quiet prints the tail at the end instead.
-    let output = mock.rexctl(&[
+    let output = mock.cli(&[
         "run",
         "demo:shell",
         "--quiet",
@@ -1661,7 +1661,7 @@ fn run_types_into_an_idle_shell_and_prints_the_new_output() {
 fn run_refuses_panes_that_arent_idle_at_a_shell_prompt() {
     let mock = shell_demo();
     // Claude Code's pane, named directly.
-    let output = mock.rexctl(&["run", "demo:claude", "--", "ls"]);
+    let output = mock.cli(&["run", "demo:claude", "--", "ls"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(
         stderr(&output).contains("isn't idle at a shell prompt"),
@@ -1669,25 +1669,25 @@ fn run_refuses_panes_that_arent_idle_at_a_shell_prompt() {
     );
     // The shell is busy running something.
     mock.state.lock().unwrap().shell_busy = usize::MAX;
-    let output = mock.rexctl(&["run", "demo:shell", "--", "ls"]);
+    let output = mock.cli(&["run", "demo:shell", "--", "ls"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(
         stderr(&output).contains("foreground program is make"),
         "{output:?}"
     );
     // No idle shell anywhere in the session.
-    let output = mock.rexctl(&["run", "demo", "--", "ls"]);
+    let output = mock.cli(&["run", "demo", "--", "ls"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(
         stderr(&output).contains("no pane here is idle"),
         "{output:?}"
     );
     // Foreign sessions, and commands that aren't one plain line.
-    let output = mock.rexctl(&["run", "work", "--", "ls"]);
+    let output = mock.cli(&["run", "work", "--", "ls"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(stderr(&output).contains("--allow-foreign"), "{output:?}");
     for bad in ["ls\nrm -rf /", "ls\t", "\x03"] {
-        let output = mock.rexctl(&["run", "demo", "--", bad]);
+        let output = mock.cli(&["run", "demo", "--", bad]);
         assert_eq!(code(&output), 3, "{bad:?}: {output:?}");
     }
     assert!(mock.writes().is_empty());
@@ -1697,7 +1697,7 @@ fn run_refuses_panes_that_arent_idle_at_a_shell_prompt() {
 fn run_waits_for_the_prompt_and_times_out() {
     let mock = shell_demo();
     mock.state.lock().unwrap().busy_after_enter = usize::MAX;
-    let output = mock.rexctl(&["--json", "run", "demo", "--timeout", "1s", "--", "make"]);
+    let output = mock.cli(&["--json", "run", "demo", "--timeout", "1s", "--", "make"]);
     assert_eq!(code(&output), 15, "{output:?}");
     let last = json_lines(&output).pop().unwrap();
     assert_eq!(last["status"], "timeout");
@@ -1709,16 +1709,16 @@ fn run_waits_for_the_prompt_and_times_out() {
 fn panes_without_claude_need_block() {
     let mock = Mock::start(vec![(SID, "shell", vec![shell()])], AfterEnter::Done);
     mock.own(SID, None);
-    let output = mock.rexctl(&["status", "shell"]);
+    let output = mock.cli(&["status", "shell"]);
     assert_eq!(code(&output), 1, "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("--block"));
 
-    let output = mock.rexctl(&["--json", "status", "shell", "--block", "5he11"]);
+    let output = mock.cli(&["--json", "status", "shell", "--block", "5he11"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(json_lines(&output)[0]["block_id"], shell().id);
 
     // The shell never turned on bracketed paste, so send won't type into it.
-    let output = mock.rexctl(&["send", "shell", "ls", "--block", "5he11"]);
+    let output = mock.cli(&["send", "shell", "ls", "--block", "5he11"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(mock.writes().is_empty());
 }
@@ -1726,7 +1726,7 @@ fn panes_without_claude_need_block() {
 #[test]
 fn usage_errors_exit_2() {
     let dir = tempfile::tempdir().unwrap();
-    let output = rexctl(
+    let output = cli(
         dir.path(),
         &dir.path().join("c.toml"),
         "http://127.0.0.1:9",

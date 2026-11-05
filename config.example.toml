@@ -1,10 +1,10 @@
-# rexctl configuration: copy to ~/.config/rex-relay/config.toml (or point
+# rex-relay configuration: copy to ~/.config/rex-relay/config.toml (or point
 # REX_RELAY_CONFIG / --config at it). Every key is optional.
 
 # The endpoint to use when neither --endpoint nor REX_SERVER names one.
 endpoint = "https://rex-host.example.ts.net"
 
-# Every endpoint rexctl may connect to. An endpoint that isn't listed is refused
+# Every endpoint rex-relay may connect to. An endpoint that isn't listed is refused
 # before any connection is made; an empty or missing list refuses all of them.
 # Entries are compared in canonical form, so wss://host:443/ matches https://host.
 allowed_endpoints = [
@@ -18,11 +18,11 @@ max_message_bytes = 32768
 # How long `send` and `wait` wait for Claude Code to stop, by default.
 timeout = "30m"
 
-# How long one call to the Rex server may take before rexctl treats the
+# How long one call to the Rex server may take before rex-relay treats the
 # connection as stalled. `send` and `wait` then reconnect and keep waiting.
 call_timeout = "10s"
 
-# How long rexctl keeps trying to connect before it gives up with exit code 16:
+# How long rex-relay keeps trying to connect before it gives up with exit code 16:
 # for a command's first connection, and for a connection that send, wait, or
 # run lost along the way. "0s" tries once.
 connect_timeout = "60s"
