@@ -1,0 +1,37 @@
+#!/bin/sh
+# Usage: scripts/worktree-new <issue> [slug]
+# Create ../<repo>-issue-<n> on branch issue-<n>-<slug>, starting from origin/main.
+# Running it again prints the existing worktree's path.
+set -eu
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "$0")/lib.sh"
+
+[ $# -ge 1 ] && [ $# -le 2 ] || usage "usage: worktree-new <issue> [slug]"
+n=$1
+is_number "$n" || usage "issue must be a number, got '$n'"
+need_repo
+
+path=$(issue_path "$n")
+if git worktree list --porcelain | grep -qxF "worktree $path"; then
+	printf '%s\n' "$path"
+	exit 0
+fi
+[ ! -e "$path" ] || die "$path exists but is not a worktree of this repository"
+
+# Reuse a local branch for this issue if one exists, whatever its slug.
+branch=$(git for-each-ref --format='%(refname:short)' "refs/heads/issue-$n-*" | head -n 1)
+if [ -n "$branch" ]; then
+	git worktree add "$path" "$branch" >&2
+else
+	if [ $# -eq 2 ]; then
+		slug=$2
+	else
+		slug=$(gh issue view "$n" --json title -q .title) || die "could not read issue #$n"
+	fi
+	slug=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | cut -c1-40 | sed 's/^-*//; s/-*$//')
+	[ -n "$slug" ] || usage "slug is empty after cleanup; pass one explicitly"
+	branch="issue-$n-$slug"
+	git fetch -q origin main
+	git worktree add --no-track -b "$branch" "$path" origin/main >&2
+fi
+printf '%s\n' "$path"
