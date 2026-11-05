@@ -35,7 +35,21 @@ looks, `send` refuses with exit 3 until `src/prompt.rs` learns the new layout.
 
 ## Install
 
-You need Rust 1.89 or later.
+Releases have prebuilt binaries for Linux (x86_64, statically linked with musl) and macOS (Apple
+silicon and Intel). To install the latest release, or update to it, run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mbriggs/rex-relay/main/install.sh | sh
+```
+
+The script downloads the archive for your platform, checks it against its SHA-256 checksum,
+and installs `rexctl` into `~/.local/bin`. To pick a release, set `REXCTL_VERSION=v0.1.0`. To
+pick a directory, set `REXCTL_INSTALL_DIR`. To install by hand, download
+`rexctl-<target>.tar.gz` and `SHA256SUMS` from the
+[releases page](https://github.com/mbriggs/rex-relay/releases), then check the archive with
+`shasum -a 256 -c SHA256SUMS --ignore-missing`.
+
+To build from source, you need Rust 1.89 or later:
 
 ```sh
 cargo install --locked --git https://github.com/mbriggs/rex-relay   # installs rexctl into ~/.cargo/bin
@@ -331,6 +345,13 @@ and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 
 These rails limit what `rexctl` does. They don't limit other clients of the Rex server. Read
 [SECURITY.md](SECURITY.md) before you expose a Rex server on a network.
+
+## Releasing
+
+Pushing a tag that matches `Cargo.toml`'s version, such as `v0.1.0`, runs
+`.github/workflows/release.yml`. It builds the binaries, then publishes a GitHub release with one
+archive per target, a `.sha256` file for each, a combined `SHA256SUMS`, and `install.sh`. The
+release fails if the tag and the version differ.
 
 ## Development
 
