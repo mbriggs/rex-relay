@@ -135,9 +135,9 @@ lists the matching ids; use one of them.
 | --- | --- |
 | `rex-relay list` | Lists sessions. `*` (or `"owned": true`) marks sessions rex-relay created, followed by their purpose. A renamed session shows `(created as LABEL)` after its current label. |
 | `rex-relay tree [session]` | Shows each session's tabs and terminal panes: numbers, labels, ids, the program in each pane, and its OSC 7501 status. |
-| `rex-relay status <target> [--block ID]` | Shows the Claude Code pane's status and message. |
+| `rex-relay status <target> [--block ID]` | Shows the Claude Code pane's status, permission mode, and message. |
 | `rex-relay read <target> [--lines N] [--block ID]` | Prints the pane's last N lines (default 100; 0 for all). |
-| `rex-relay new [label] [--cwd DIR] [--cmd claude] [--purpose TEXT] [--wait-ready [--timeout D]]` | Creates a session with the initial label `label` (or one Rex picks), whose one pane runs `--cmd` (default `claude`, with arguments quoted as in a shell, though no shell runs it) in `--cwd`, and records it in the ownership registry. `--cwd` is an absolute path, `~`, or a path under `~/`; the Rex host expands `~` to its own home directory. `new` fails if the directory doesn't exist on the Rex host. To check, it opens a session labelled `rex-relay cwd check` and closes it again. With `--wait-ready`, `new` prints the ids, then waits until Claude Code is at its input prompt, where `send` would type, and exits 0. If Claude Code shows a dialog first, such as folder trust, it exits with that status's code (10 for a dialog) and prints the dialog's text. If the prompt doesn't appear within `--timeout` (default: the config's `timeout`, or 30m), it prints the pane's last 20 lines and exits 15. |
+| `rex-relay new [label] [--cwd DIR] [--cmd claude | --auto] [--purpose TEXT] [--wait-ready [--timeout D]]` | Creates a session with the initial label `label` (or one Rex picks), whose one pane runs `--cmd` (default `claude`, with arguments quoted as in a shell, though no shell runs it) in `--cwd`, and records it in the ownership registry. `--cwd` is an absolute path, `~`, or a path under `~/`; the Rex host expands `~` to its own home directory. `new` fails if the directory doesn't exist on the Rex host. To check, it opens a session labelled `rex-relay cwd check` and closes it again. `--auto` runs `claude --permission-mode auto` and can't be combined with `--cmd`. With `--wait-ready`, `new` prints the ids, then waits until Claude Code is at its input prompt, where `send` would type, and exits 0. If Claude Code shows a dialog first, such as folder trust, it exits with that status's code (10 for a dialog) and prints the dialog's text. If the prompt doesn't appear within `--timeout` (default: the config's `timeout`, or 30m), it prints the pane's last 20 lines and exits 15. |
 | `rex-relay send <target> "msg"` | Pastes the message into the Claude Code pane, presses Enter once, then streams the pane's new output until Claude Code stops. Owned sessions only, unless `--allow-foreign`. |
 | `rex-relay run <target> -- <command>` | Types a command line into a shell pane that is idle at its prompt, presses Enter, and streams the new output until the prompt returns. Owned sessions only, unless `--allow-foreign`. See [Running shell commands](#running-shell-commands). |
 | `rex-relay wait <target>` | Streams the pane's new output until Claude Code stops working. Returns at once if it isn't working. |
@@ -216,6 +216,13 @@ Claude Code reports no status for its folder-trust dialog, so `status` and `wait
 when the pane is Idle. A menu there is a Dialog: `status` shows the folder it asks about, and
 `wait` exits 10 and prints the dialog's text.
 
+`status` and `tree` also read Claude Code's permission mode from the footer under its prompt,
+such as `⏵⏵ auto mode on (shift+tab to cycle)`. The mode is `default` when the footer names
+none, one of `acceptEdits`, `plan`, `auto`, `dontAsk`, or `bypassPermissions` when it does, and
+`unknown` when the prompt isn't on screen, such as during a permission request. Text output
+shows it in brackets after the status (`Working [auto]`); JSON output has it as `mode`, which
+`tree` sets to `null` for panes that don't run Claude Code.
+
 The message is written as one bracketed paste (`ESC[200~ … ESC[201~`), so newlines stay inside
 the message, followed after a short pause by a single carriage return (Enter).
 
@@ -225,6 +232,15 @@ status the pane had before the message doesn't count. Each report carries the ti
 so a new Done counts even when the pane already showed Done before the message. A pane whose
 records disappear after Working counts as Done only once it has stayed that way for 5 seconds,
 because Claude Code clears its record for a moment during some turns.
+
+Claude Code can end its turn while shells it started in the background keep running. Its status
+then says Done, but the footer under the prompt says `1 shell still running` or `N shells still
+running`. `rex-relay` reads that footer and reports the pane as Background instead of Done or
+Idle: `status` prints `Background (2 shells)`, and `--json` gives `"status":"background"` with
+`"shells":2`. `send` and `wait` don't stop at Background. They keep waiting until the shells
+finish and the pane is Done, or until `--timeout`, which exits 15 with `last_status` set to
+`background`. The footer has no status record or event, so `send` and `wait` re-read it with each
+3-second status poll, and once more before they report Done.
 
 ### Lost connections
 
@@ -306,7 +322,8 @@ a connection that couldn't be restored with
 failures with `{"type":"error","message":"…","exit_code":1}`. While waiting, `connection` objects
 report a lost connection, a failed first reconnect attempt, and a restored connection:
 `{"type":"connection","state":"lost","message":"…"}`, with `state` set to `lost`, `retrying`, or
-`restored`. With `--quiet`, a `{"type":"tail","lines":[…]}` object comes just before the result
+`restored`. `status` objects also carry `shells`, the number of background shells the footer
+shows. With `--quiet`, a `{"type":"tail","lines":[…]}` object comes just before the result
 instead of `output` objects. `list`, `status`, `read`, `new`
 and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 
@@ -314,7 +331,7 @@ and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Done (or the command succeeded). `wait` also returns 0 for an idle pane. |
+| 0 | Done (or the command succeeded). `wait` also returns 0 for an idle pane. Never while background shells run. |
 | 1 | Error: connection, protocol, session or pane not found, pane closed. |
 | 2 | Usage error, including a label that matches more than one session. |
 | 3 | Refused by a guard rail. Nothing was typed. |

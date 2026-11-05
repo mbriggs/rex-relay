@@ -109,6 +109,10 @@ pub struct NewArgs {
     /// --cmd "claude --append-system-prompt 'Be terse.'"; no shell runs it.
     #[arg(long, default_value = "claude", value_parser = parse_program, value_name = "COMMAND")]
     pub cmd: Program,
+    /// Run Claude Code in auto permission mode, the same as
+    /// --cmd "claude --permission-mode auto".
+    #[arg(long, conflicts_with = "cmd")]
+    pub auto: bool,
     /// What the session is for, kept in the ownership registry and shown by `list`.
     #[arg(long, value_name = "TEXT")]
     pub purpose: Option<String>,
@@ -210,6 +214,17 @@ pub struct WaitOptions {
 /// A program and its arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program(pub Vec<String>);
+
+impl Program {
+    /// Claude Code in auto permission mode, for `new --auto`.
+    pub fn claude_auto() -> Self {
+        Program(
+            ["claude", "--permission-mode", "auto"]
+                .map(String::from)
+                .to_vec(),
+        )
+    }
+}
 
 /// Splits `--cmd` into words with POSIX shell quoting rules.
 fn parse_program(text: &str) -> Result<Program, String> {

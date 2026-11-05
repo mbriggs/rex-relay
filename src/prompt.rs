@@ -12,6 +12,8 @@
 //! draws faint (SGR 2) in an empty box. Plain text has no styles, so read the `vt` format when
 //! the input matters.
 
+use serde::{Serialize, Serializer};
+
 use crate::status::Status;
 
 /// How many lines from the bottom of the pane's text are searched.
@@ -36,6 +38,11 @@ pub struct Reading {
     pub input: Option<String>,
     /// The menu's dialog, if the screen is a menu.
     pub dialog: Option<Dialog>,
+    /// The permission mode the footer under the prompt names.
+    pub mode: Mode,
+    /// Background shells the footer under the prompt says are still running, such as
+    /// `1 shell still running`. Claude Code ends its turn without waiting for them.
+    pub shells: usize,
 }
 
 impl Reading {
@@ -43,6 +50,66 @@ impl Reading {
     /// Claude Code shows before its prompt. A permission request reports a blocked status.
     pub fn startup_dialog(&self, status: Status) -> Option<&Dialog> {
         self.dialog.as_ref().filter(|_| status == Status::Idle)
+    }
+}
+
+/// Claude Code's permission mode, as its footer shows it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mode {
+    Default,
+    AcceptEdits,
+    Plan,
+    Auto,
+    DontAsk,
+    BypassPermissions,
+    /// The screen isn't the prompt, so there's no footer to read.
+    #[default]
+    Unknown,
+}
+
+impl Mode {
+    /// The footer's words for each mode but Default, which shows none. Claude Code follows
+    /// them with " on", except in its narrow layout.
+    const INDICATORS: [(&str, Mode); 5] = [
+        ("accept edits", Mode::AcceptEdits),
+        ("plan mode", Mode::Plan),
+        ("auto mode", Mode::Auto),
+        ("don't ask", Mode::DontAsk),
+        ("bypass permissions", Mode::BypassPermissions),
+    ];
+
+    /// The mode's name in output: Claude Code's `--permission-mode` value, or `unknown`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Default => "default",
+            Mode::AcceptEdits => "acceptEdits",
+            Mode::Plan => "plan",
+            Mode::Auto => "auto",
+            Mode::DontAsk => "dontAsk",
+            Mode::BypassPermissions => "bypassPermissions",
+            Mode::Unknown => "unknown",
+        }
+    }
+
+    /// The mode a footer names, such as `⏵⏵ auto mode on (shift+tab to cycle)`. A footer
+    /// that names none, such as `⏵⏵ bypass available`, is in the default mode.
+    fn from_footer(lines: &[Line]) -> Self {
+        lines
+            .iter()
+            .find_map(|l| {
+                let text = l.plain.trim_start_matches(|c: char| !c.is_alphabetic());
+                Self::INDICATORS
+                    .iter()
+                    .find(|(words, _)| text.starts_with(words))
+                    .map(|&(_, mode)| mode)
+            })
+            .unwrap_or(Mode::Default)
+    }
+}
+
+impl Serialize for Mode {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -109,10 +176,18 @@ pub fn read(screen: &str) -> Reading {
     if let Some(at) = prompt
         && !bottom[at + 1..].iter().any(|l| is_menu_line(&l.plain))
     {
+        // The footer starts below the input box's bottom edge.
+        let below = &bottom[at + 1..];
+        let footer = below
+            .iter()
+            .position(|l| is_rule(&l.plain) || is_edge(&l.plain))
+            .map_or(&[][..], |edge| &below[edge + 1..]);
         return Reading {
             screen: Screen::Prompt,
             input: input(&bottom[at..]),
             dialog: None,
+            mode: Mode::from_footer(footer),
+            shells: footer.iter().filter_map(|l| shell_count(&l.plain)).sum(),
         };
     }
     if bottom.iter().any(|l| is_menu_line(&l.plain)) {
@@ -120,13 +195,28 @@ pub fn read(screen: &str) -> Reading {
             screen: Screen::Menu,
             input: None,
             dialog: Some(Dialog::parse(bottom)),
+            mode: Mode::Unknown,
+            shells: 0,
         };
     }
     Reading {
         screen: Screen::Unknown,
         input: None,
         dialog: None,
+        mode: Mode::Unknown,
+        shells: 0,
     }
+}
+
+/// The `N` in a footer line's `N shell(s)`.
+fn shell_count(line: &str) -> Option<usize> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    words.windows(2).find_map(|w| {
+        let noun = w[1].trim_end_matches(|c: char| !c.is_alphanumeric());
+        matches!(noun, "shell" | "shells")
+            .then(|| w[0].parse().ok())
+            .flatten()
+    })
 }
 
 /// What the bottom of a pane's text shows.
@@ -440,6 +530,49 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_permission_mode_from_the_footer() {
+        let with_footer = |footer: &str| {
+            [
+                "● Fixed it.",
+                RULE,
+                "❯ plan mode on",
+                RULE,
+                "  Opus ╱ 12%",
+                footer,
+            ]
+            .join("\n")
+        };
+        for (footer, mode) in [
+            ("  ? for shortcuts", Mode::Default),
+            ("  ⏵⏵ bypass available", Mode::Default),
+            ("  ⏵⏵ auto mode", Mode::Auto),
+            (
+                "  ⏵⏵ accept edits on (shift+tab to cycle)",
+                Mode::AcceptEdits,
+            ),
+            ("  ⏸ plan mode on (shift+tab to cycle)", Mode::Plan),
+            ("  ⏵⏵ auto mode on (shift+tab to cycle)", Mode::Auto),
+            ("  ⏵⏵ don't ask on (shift+tab to cycle)", Mode::DontAsk),
+            (
+                "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+                Mode::BypassPermissions,
+            ),
+        ] {
+            assert_eq!(read(&with_footer(footer)).mode, mode, "{footer}");
+        }
+        assert_eq!(read(&vt("")).mode, Mode::Auto, "styled footer");
+        let boxed = ["╭────────╮", "│ >      │", "╰────────╯", "  ⏸ plan mode on"];
+        assert_eq!(read(&boxed.join("\n")).mode, Mode::Plan);
+        let menu = ["Allow Bash?", "❯ 1. Yes", "  2. No", "  ⏵⏵ auto mode on"];
+        assert_eq!(read(&menu.join("\n")).mode, Mode::Unknown);
+        assert_eq!(read("$ ls").mode, Mode::Unknown);
+        assert_eq!(
+            serde_json::to_value(Mode::AcceptEdits).unwrap(),
+            "acceptEdits"
+        );
+    }
+
+    #[test]
     fn reads_typed_input_but_not_the_placeholder() {
         assert_eq!(
             read(&vt("")),
@@ -447,6 +580,8 @@ mod tests {
                 screen: Screen::Prompt,
                 input: None,
                 dialog: None,
+                mode: Mode::Auto,
+                shells: 0,
             }
         );
         let placeholder = vt("\x1b[0m\x1b[2mTry \"fix lint errors\"\x1b[0m");
@@ -491,5 +626,25 @@ mod tests {
         let mut screen = current(&["❯ "]);
         screen.push_str(&"\noutput".repeat(BOTTOM));
         assert_eq!(classify(&screen), Screen::Unknown);
+    }
+
+    #[test]
+    fn counts_background_shells_in_the_footer_only() {
+        let with_footer = |input: &str, footer: &str| {
+            let mut screen = current(&["● Started 3 shells in the background.", RULE, input]);
+            screen.push_str(&format!("\n  {footer}"));
+            read(&screen).shells
+        };
+        assert_eq!(with_footer("❯ ", "? for shortcuts"), 0);
+        assert_eq!(with_footer("❯ ", "1 shell still running"), 1);
+        assert_eq!(
+            with_footer("❯ ", "⏵⏵ auto mode on · 3 shells still running"),
+            3
+        );
+        assert_eq!(with_footer("❯ kill 2 shells", "? for shortcuts"), 0);
+        assert_eq!(
+            read("$ echo 1 shell still running\n1 shell still running").shells,
+            0
+        );
     }
 }

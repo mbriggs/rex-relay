@@ -10,11 +10,19 @@ change the command-line interface.
 - A Dialog status for menus Claude Code shows without reporting a status, such as the
   folder-trust dialog. `status` shows the folder it names, and `wait` exits 10 and prints the
   dialog's text instead of reporting Idle.
+- `new --auto` starts Claude Code in auto permission mode, the same as
+  `--cmd "claude --permission-mode auto"`. It can't be combined with `--cmd`.
+- `status` and `tree` show Claude Code's permission mode, read from the footer under its
+  prompt: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`, or
+  `unknown` when the prompt isn't on screen. JSON output has it as `mode`.
 - `new --wait-ready [--timeout D]` waits until Claude Code is at its input prompt, so a `send`
   right after it is accepted. A startup dialog exits 10 with its text; a timeout exits 15 with
   the pane's last lines (#14).
 
 ### Changed
+
+- `status` and `tree` text output puts the permission mode in brackets after the status, such
+  as `Working [auto] — Editing files`.
 
 - `send`'s refusals at the screen check name what the pane shows: a dialog, Claude Code still
   starting, or a pane that doesn't run Claude Code. Only the last one suggests `--block`.
@@ -29,6 +37,9 @@ change the command-line interface.
 - `new --cwd` expands a leading `~` to the Rex host's home directory, and fails if the
   directory doesn't exist there. Before, Rex started the pane in the home directory without an
   error. `--cwd` must be an absolute path, `~`, or a path under `~/` (#13).
+- `status`, `tree`, `send` and `wait` no longer report Done while Claude Code's footer shows
+  background shells still running. The pane is Background (`"shells": N` in JSON), and `send`
+  and `wait` keep waiting until the shells finish (#34).
 
 ## [0.1.0] - 2026-11-04
 
