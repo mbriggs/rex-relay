@@ -1,0 +1,33 @@
+# rexctl configuration: copy to ~/.config/rex-relay/config.toml (or point
+# REX_RELAY_CONFIG / --config at it). Every key is optional.
+
+# The endpoint to use when neither --endpoint nor REX_SERVER names one.
+endpoint = "https://rex-host.example.ts.net"
+
+# Every endpoint rexctl may connect to. An endpoint that isn't listed is refused
+# before any connection is made; an empty or missing list refuses all of them.
+# Entries are compared in canonical form, so wss://host:443/ matches https://host.
+allowed_endpoints = [
+  "https://rex-host.example.ts.net",
+  # "unix:///run/user/1000/rex/server.sock",
+]
+
+# The prefix `new` adds to the initial label of the sessions it creates. It's
+# only a label: Claude Code renames sessions, so ownership is tracked by
+# session id in the registry below, never by label.
+label_prefix = "grokbot-"
+
+# The largest message `send` accepts, in bytes.
+max_message_bytes = 32768
+
+# How long `send` and `wait` wait for Claude Code to stop, by default.
+timeout = "30m"
+
+# Where the audit log goes. Defaults to $XDG_STATE_HOME/rex-relay/audit.jsonl,
+# that is ~/.local/state/rex-relay/audit.jsonl.
+# audit_log = "/home/you/.local/state/rex-relay/audit.jsonl"
+
+# The ownership registry: the sessions `new` created, by endpoint and session id.
+# `send` targets only these (unless --allow-foreign) and `close` closes only
+# these. Defaults to $XDG_STATE_HOME/rex-relay/owned.json.
+# registry = "/home/you/.local/state/rex-relay/owned.json"
