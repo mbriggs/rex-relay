@@ -1171,29 +1171,16 @@ fn send_refuses_menus_like_the_trust_dialog() {
     // bracketed paste on and reports no status, so only the screen shows that Enter here would
     // pick an option.
     let mock = demo(vec![], AfterEnter::Done);
-    mock.state.lock().unwrap().screen = [
-        "╭──────────────────────────────────────────╮",
-        "│ Do you trust the files in this folder?   │",
-        "│                                          │",
-        "│ /srv/app                                 │",
-        "│                                          │",
-        "│ ❯ 1. Yes, proceed                        │",
-        "│   2. No, exit                            │",
-        "╰──────────────────────────────────────────╯",
-        "   Enter to confirm · Esc to exit",
-    ]
-    .map(String::from)
-    .to_vec();
+    mock.state.lock().unwrap().screen = trust_dialog();
     for args in [
         &["send", "demo", "fix the bug"][..],
         &["send", "demo", "1", "--answer"],
     ] {
         let output = mock.cli(args);
         assert_eq!(code(&output), 3, "{args:?}: {output:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("never picks menu options"),
-            "{output:?}"
-        );
+        let err = stderr(&output);
+        assert!(err.contains("never picks menu options"), "{err}");
+        assert!(err.contains("trust /srv/app"), "{err}");
     }
     assert!(mock.writes().is_empty());
     let audit = mock.audit();
@@ -1205,11 +1192,79 @@ fn send_refuses_menus_like_the_trust_dialog() {
     );
     assert!(audit.iter().all(|e| e["block"] == claude(vec![]).id));
 
-    // A shell prompt isn't Claude Code's either.
-    mock.state.lock().unwrap().screen = vec!["$ ls".into(), "src".into(), "$".into()];
+    // Claude Code runs, but hasn't drawn its prompt yet.
+    mock.state.lock().unwrap().screen = vec!["$ claude".into()];
     let output = mock.cli(&["send", "demo", "hello"]);
     assert_eq!(code(&output), 3, "{output:?}");
+    assert!(stderr(&output).contains("still starting"), "{output:?}");
+
+    // A shell pane, named with --block, isn't Claude Code's.
+    mock.state.lock().unwrap().screen = vec!["$ ls".into(), "src".into(), "$".into()];
+    let output = mock.cli(&["send", "demo", "hello", "--block", shell().id]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(
+        stderr(&output).contains("doesn't run Claude Code"),
+        "{output:?}"
+    );
     assert!(mock.writes().is_empty());
+}
+
+/// Claude Code's folder-trust dialog, which it shows before its prompt and reports no status
+/// for.
+fn trust_dialog() -> Vec<String> {
+    [
+        "╭──────────────────────────────────────────╮",
+        "│ Do you trust the files in this folder?   │",
+        "│                                          │",
+        "│ /srv/app                                 │",
+        "│                                          │",
+        "│ ❯ 1. Yes, proceed                        │",
+        "│   2. No, exit                            │",
+        "╰──────────────────────────────────────────╯",
+        "   Enter to confirm · Esc to exit",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+#[test]
+fn status_and_wait_report_the_trust_dialog() {
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.state.lock().unwrap().screen = trust_dialog();
+
+    let output = mock.cli(&["status", "demo"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert!(
+        stdout(&output).contains(": Dialog — asks whether to trust /srv/app"),
+        "{output:?}"
+    );
+    let status = &json_lines(&mock.cli(&["--json", "status", "demo"]))[0];
+    assert_eq!(status["status"], "dialog");
+    assert_eq!(status["folder"], "/srv/app");
+    assert!(
+        status["dialog"]
+            .as_str()
+            .unwrap()
+            .starts_with("Do you trust")
+    );
+
+    let output = mock.cli(&["wait", "demo", "--quiet"]);
+    assert_eq!(code(&output), 10, "{output:?}");
+    let text = "Do you trust the files in this folder?\n\n/srv/app\n\n❯ 1. Yes, proceed\n2. No, exit\nEnter to confirm · Esc to exit";
+    assert!(
+        stderr(&output).contains(&format!("Dialog: {text}")),
+        "{output:?}"
+    );
+    let result = json_lines(&mock.cli(&["--json", "wait", "demo"]));
+    let result = result.last().unwrap();
+    assert_eq!(result["status"], "dialog");
+    assert_eq!(result["msg"], text);
+    assert_eq!(result["exit_code"], 10);
+    assert!(mock.writes().is_empty());
+
+    // At the prompt, an idle pane is still just idle.
+    mock.state.lock().unwrap().screen = screen(&["● Ready."]);
+    assert_eq!(code(&mock.cli(&["wait", "demo", "--quiet"])), 0);
 }
 
 #[test]

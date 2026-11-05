@@ -96,6 +96,9 @@ pub enum Status {
     Question,
     NeedsSignIn,
     NeedsInput,
+    /// A menu the program doesn't report in its status, such as Claude Code's folder-trust
+    /// dialog. Only the screen shows it.
+    Dialog,
     Error,
 }
 
@@ -125,6 +128,7 @@ impl Status {
             Status::Question => "Question",
             Status::NeedsSignIn => "Needs sign-in",
             Status::NeedsInput => "Needs input",
+            Status::Dialog => "Dialog",
             Status::Error => "Error",
         }
     }
@@ -139,6 +143,7 @@ impl Status {
             Status::Question => "question",
             Status::NeedsSignIn => "needs_sign_in",
             Status::NeedsInput => "needs_input",
+            Status::Dialog => "dialog",
             Status::Error => "error",
         }
     }
@@ -146,7 +151,11 @@ impl Status {
     pub fn is_blocked(self) -> bool {
         matches!(
             self,
-            Status::NeedsApproval | Status::Question | Status::NeedsSignIn | Status::NeedsInput
+            Status::NeedsApproval
+                | Status::Question
+                | Status::NeedsSignIn
+                | Status::NeedsInput
+                | Status::Dialog
         )
     }
 
@@ -154,7 +163,8 @@ impl Status {
     pub fn exit_code(self) -> i32 {
         match self {
             Status::Idle | Status::Done | Status::Working => exit::OK,
-            Status::NeedsApproval => exit::NEEDS_APPROVAL,
+            // A person answers the dialog in Rex, as with a permission request.
+            Status::NeedsApproval | Status::Dialog => exit::NEEDS_APPROVAL,
             Status::Question => exit::QUESTION,
             Status::NeedsInput => exit::NEEDS_INPUT,
             Status::NeedsSignIn => exit::NEEDS_SIGN_IN,
