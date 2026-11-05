@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::audit::{self, AuditLog, Entry};
-use crate::cli::{Cli, Command, Program, SendArgs, Target, WaitArgs, WaitOptions};
+use crate::cli::{Cli, Command, Program, RunArgs, SendArgs, Target, WaitArgs, WaitOptions};
 use crate::config::{self, Config};
 use crate::endpoint::Endpoint;
 use crate::exit;
@@ -135,6 +135,7 @@ fn execute(cli: &Cli, out: &Out) -> Result<i32> {
     let mutating = match cli.command {
         Command::New { .. } => Some("new"),
         Command::Send(_) => Some("send"),
+        Command::Run(_) => Some("run"),
         Command::Close { .. } => Some("close"),
         _ => None,
     };
@@ -183,6 +184,7 @@ fn execute(cli: &Cli, out: &Out) -> Result<i32> {
         ),
         Command::Send(args) => send(&ctx, out, args),
         Command::Wait(args) => wait(&ctx, out, args),
+        Command::Run(args) => run_shell(&ctx, out, args),
         Command::Close { session } => close(&ctx, out, session),
     }
 }
@@ -649,8 +651,24 @@ fn audit_error(error: &anyhow::Error) -> String {
 }
 
 fn send(ctx: &Ctx, out: &Out, args: &SendArgs) -> Result<i32> {
-    let mut attempt = SendAttempt::new(args);
-    let result = attempt.run(ctx, out);
+    let attempt = Attempt::new("send", &args.message, &args.target.name);
+    audited(ctx, out, attempt, |a| a.send(ctx, out, args))
+}
+
+fn run_shell(ctx: &Ctx, out: &Out, args: &RunArgs) -> Result<i32> {
+    let command = args.command.join(" ");
+    let attempt = Attempt::new("run", &command, &args.target.name);
+    audited(ctx, out, attempt, |a| a.run(ctx, out, args, &command))
+}
+
+/// Runs `act` and appends the audit entry for how it ended, whatever happened.
+fn audited<'a>(
+    ctx: &Ctx,
+    out: &Out,
+    mut attempt: Attempt<'a>,
+    act: impl FnOnce(&mut Attempt<'a>) -> Result<Outcome>,
+) -> Result<i32> {
+    let result = act(&mut attempt);
     let outcome = match &result {
         Ok(outcome) => outcome.as_str().to_owned(),
         Err(error) => audit_error(error),
@@ -659,10 +677,15 @@ fn send(ctx: &Ctx, out: &Out, args: &SendArgs) -> Result<i32> {
     Ok(finish(out, result?))
 }
 
-/// One `send`, and what it has learned about its target so far, which the audit log records
-/// however far it got.
-struct SendAttempt<'a> {
-    args: &'a SendArgs,
+/// One `send` or `run`, and what it has learned about its target so far, which the audit log
+/// records however far it got.
+struct Attempt<'a> {
+    /// `send` or `run`.
+    command: &'static str,
+    /// The message or command line. The audit log keeps only its hash and length.
+    text: &'a str,
+    /// The target as given, until it resolves to a session.
+    target: &'a str,
     started: String,
     session: Option<Session>,
     block: Option<BlockId>,
@@ -672,10 +695,12 @@ struct SendAttempt<'a> {
     input_cleared: bool,
 }
 
-impl<'a> SendAttempt<'a> {
-    fn new(args: &'a SendArgs) -> Self {
-        SendAttempt {
-            args,
+impl<'a> Attempt<'a> {
+    fn new(command: &'static str, text: &'a str, target: &'a str) -> Self {
+        Attempt {
+            command,
+            text,
+            target,
             started: audit::now(),
             session: None,
             block: None,
@@ -687,13 +712,13 @@ impl<'a> SendAttempt<'a> {
     /// An audit entry with this result. After the message is sent, entries carry the time
     /// they are written; before, the time the attempt began.
     fn entry(&self, ctx: &Ctx, result: String) -> Entry {
-        let mut entry = Entry::new("send", ctx.endpoint_key()).message(&self.args.message);
+        let mut entry = Entry::new(self.command, ctx.endpoint_key()).message(self.text);
         if !self.sent {
             entry.timestamp.clone_from(&self.started);
         }
         entry.session = Some(match &self.session {
             Some(session) => session.id.to_string(),
-            None => self.args.target.name.clone(),
+            None => self.target.to_owned(),
         });
         entry.session_label = self.session.as_ref().map(|s| s.label.clone());
         entry.block = self.block.as_ref().map(BlockId::to_string);
@@ -702,8 +727,7 @@ impl<'a> SendAttempt<'a> {
         entry
     }
 
-    fn run(&mut self, ctx: &Ctx, out: &Out) -> Result<Outcome> {
-        let args = self.args;
+    fn send(&mut self, ctx: &Ctx, out: &Out, args: &SendArgs) -> Result<Outcome> {
         // The flag can only tighten the configured limit.
         let limit = ctx.config.max_message_bytes();
         let max = args.max_bytes.map_or(limit, |m| m.min(limit));
@@ -772,7 +796,7 @@ impl<'a> SendAttempt<'a> {
                 located.session.label
             ));
         }
-        let pump = Output::new(&args.wait, || Ok(screen))?;
+        let pump = Output::new(&args.wait, DEFAULT_HOLDBACK, || Ok(screen))?;
         let watch = Watch {
             sid,
             bid,
@@ -782,6 +806,177 @@ impl<'a> SendAttempt<'a> {
             pump,
         };
         watch.run(rex, ctx, out, &args.wait)
+    }
+}
+
+impl Attempt<'_> {
+    fn run(&mut self, ctx: &Ctx, out: &Out, args: &RunArgs, command: &str) -> Result<Outcome> {
+        let limit = ctx.config.max_message_bytes();
+        let max = args.max_bytes.map_or(limit, |m| m.min(limit));
+        guard::check_command(command, max)?;
+        let mut rex = ctx.connect()?;
+        let (session, scope) = rex.resolve_target(&args.target.name)?;
+        self.session = Some(session.clone());
+        let owned = ctx.owned(&session.id)?.is_some();
+        guard::check_send_owned(
+            owned,
+            session.id.as_str(),
+            &session.label,
+            args.allow_foreign,
+        )?;
+        let located = locate(
+            &mut rex,
+            session,
+            &scope,
+            args.target.block.as_deref(),
+            true,
+            pane::choose_shell,
+        )?;
+        let (sid, bid) = (located.session.id, located.pane.block_id);
+        self.block = Some(bid.clone());
+        if located.evidence.idle_shell().is_none() {
+            let program = located
+                .evidence
+                .program()
+                .unwrap_or_else(|| "unknown".into());
+            return Err(Refusal(format!(
+                "the pane isn't idle at a shell prompt (its foreground program is {program})"
+            ))
+            .into());
+        }
+        let output = Output::new(&args.wait, SHELL_HOLDBACK, || rex.read_text(&sid, &bid))?;
+        rex.write(&sid, &bid, command)?;
+        std::thread::sleep(KEY_DELAY);
+        let typed = rex.read_text(&sid, &bid)?;
+        rex.write(&sid, &bid, "\r")?;
+        self.sent = true;
+        ctx.audit.append(&self.entry(ctx, "sent".into()))?;
+        if out.json {
+            out.event(json!({
+                "type": "sent",
+                "session_id": sid,
+                "session_label": located.session.label,
+                "block_id": bid,
+                "bytes": command.len(),
+            }));
+        } else if !args.wait.quiet {
+            out.note(&format!(
+                "ran {} bytes in {} {bid}",
+                command.len(),
+                located.session.label
+            ));
+        }
+        let watch = ShellWatch {
+            sid,
+            bid,
+            typed,
+            output,
+        };
+        let mut link = Link::new(rex, ctx);
+        let result = watch.follow(&mut link, out, &args.wait, timeout(ctx, &args.wait));
+        link.close();
+        result
+    }
+}
+
+/// Lines at the bottom of a shell's screen that may still change: the prompt line.
+const SHELL_HOLDBACK: usize = 1;
+/// How often `run` checks whether the shell is back at its prompt.
+const SHELL_POLL: Duration = Duration::from_millis(250);
+
+/// Follows a shell pane after `run` pressed Enter, until the shell is back at its prompt. Rex
+/// reports no command boundaries or exit statuses, so the prompt counts as back when the shell
+/// is the foreground program and the screen has changed since the command was typed, on two
+/// checks in a row. It only reads, so nothing it does after a reconnect can type.
+struct ShellWatch {
+    sid: SessionId,
+    bid: BlockId,
+    /// The pane's text with the command typed, before Enter.
+    typed: String,
+    output: Output,
+}
+
+impl ShellWatch {
+    fn follow(
+        mut self,
+        link: &mut Link,
+        out: &Out,
+        options: &WaitOptions,
+        timeout: Duration,
+    ) -> Result<Outcome> {
+        let deadline = Instant::now() + timeout;
+        let poll = options.poll.clamp(Duration::from_millis(100), SHELL_POLL);
+        let mut back_once = false;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                let status = Status::Working;
+                if link.rex.is_none() {
+                    return Ok(Outcome::LostConnection { status });
+                }
+                self.flush(link, out);
+                return Ok(Outcome::TimedOut { status });
+            }
+            let Some(rex) = link.rex.as_mut() else {
+                if now < link.retry_at {
+                    std::thread::sleep(link.retry_at.min(deadline) - now);
+                    continue;
+                }
+                let attempt = Rex::connect(link.endpoint, link.call_timeout, link.token.as_deref())
+                    .and_then(|mut rex| rex.observe_all().map(|()| rex));
+                match attempt {
+                    Ok(rex) => {
+                        link.restore(rex);
+                        connection_note(out, "restored", "reconnected");
+                    }
+                    Err(error) => {
+                        link.failed();
+                        if link.failures == 1 {
+                            connection_note(out, "retrying", &format!("{error:#}"));
+                        }
+                    }
+                }
+                continue;
+            };
+            match self.back_at_prompt(rex, out) {
+                Ok(true) if back_once => break,
+                Ok(back) => back_once = back,
+                Err(error) if rex::is_connection_error(&error) => {
+                    connection_note(out, "lost", &format!("{error:#}"));
+                    link.lose();
+                    back_once = false;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+            std::thread::sleep(poll.min(deadline.saturating_duration_since(Instant::now())));
+        }
+        self.flush(link, out);
+        Ok(Outcome::Stopped {
+            status: Status::Done,
+            msg: None,
+        })
+    }
+
+    /// Reads the pane, prints new output, and says whether the shell looks back at its prompt.
+    fn back_at_prompt(&mut self, rex: &mut Rex, out: &Out) -> Result<bool> {
+        let text = rex.read_text(&self.sid, &self.bid)?;
+        self.output.update(out, &text);
+        let evidence = Evidence {
+            process: Some(rex.process(&self.sid, &self.bid)?),
+            ..Evidence::default()
+        };
+        Ok(evidence.idle_shell().is_some() && text.trim_end() != self.typed.trim_end())
+    }
+
+    fn flush(&mut self, link: &mut Link, out: &Out) {
+        let Some(rex) = link.rex.as_mut() else {
+            return;
+        };
+        match rex.read_text(&self.sid, &self.bid) {
+            Ok(text) => self.output.finish(out, &text),
+            Err(error) => out.note(&format!("couldn't read the pane's last output: {error:#}")),
+        }
     }
 }
 
@@ -821,7 +1016,7 @@ fn wait(ctx: &Ctx, out: &Out, args: &WaitArgs) -> Result<i32> {
     let (sid, bid) = (located.session.id, located.pane.block_id);
     let (seq, records) = rex.program_status(&sid, &bid)?;
     let tracker = Tracker::waiting(records.status());
-    let pump = Output::new(&args.wait, || rex.read_text(&sid, &bid))?;
+    let pump = Output::new(&args.wait, DEFAULT_HOLDBACK, || rex.read_text(&sid, &bid))?;
     let watch = Watch {
         sid,
         bid,
@@ -1023,13 +1218,41 @@ enum Output {
 }
 
 impl Output {
-    /// `baseline` reads the pane's text, and is only called when streaming.
-    fn new(options: &WaitOptions, baseline: impl FnOnce() -> Result<String>) -> Result<Self> {
+    /// `baseline` reads the pane's text, and is only called when streaming. `holdback` lines
+    /// at the bottom wait until they stop changing.
+    fn new(
+        options: &WaitOptions,
+        holdback: usize,
+        baseline: impl FnOnce() -> Result<String>,
+    ) -> Result<Self> {
         Ok(if options.quiet {
             Output::Tail(options.lines)
         } else {
-            Output::Stream(Pump::new(&baseline()?, DEFAULT_HOLDBACK))
+            Output::Stream(Pump::new(&baseline()?, holdback))
         })
+    }
+
+    /// Prints the new lines in `text`, when streaming.
+    fn update(&mut self, out: &Out, text: &str) {
+        if let Output::Stream(pump) = self {
+            print_lines(out, pump.update(text));
+        }
+    }
+
+    /// Prints what's left at the end: the rest of a stream, or the tail.
+    fn finish(&mut self, out: &Out, text: &str) {
+        match self {
+            Output::Stream(pump) => print_lines(out, pump.finish(text)),
+            Output::Tail(count) if out.json => out.event(json!({
+                "type": "tail",
+                "lines": last_lines(text, *count),
+            })),
+            Output::Tail(count) => {
+                for line in last_lines(text, *count) {
+                    out.line(line);
+                }
+            }
+        }
     }
 
     fn streams(&self) -> bool {
@@ -1112,9 +1335,7 @@ impl Watch {
         let now = Instant::now();
         if self.pump.streams() && now >= clock.next_read {
             let text = rex.read_text(&self.sid, &self.bid)?;
-            if let Output::Stream(pump) = &mut self.pump {
-                print_lines(out, pump.update(&text));
-            }
+            self.pump.update(out, &text);
             clock.next_read = now + clock.poll;
         }
         if now >= clock.next_status {
@@ -1253,18 +1474,7 @@ impl Watch {
                 return;
             }
         };
-        match &mut self.pump {
-            Output::Stream(pump) => print_lines(out, pump.finish(&text)),
-            Output::Tail(count) if out.json => out.event(json!({
-                "type": "tail",
-                "lines": last_lines(&text, *count),
-            })),
-            Output::Tail(count) => {
-                for line in last_lines(&text, *count) {
-                    out.line(line);
-                }
-            }
-        }
+        self.pump.finish(out, &text);
     }
 }
 

@@ -8,6 +8,7 @@ use rexrs::api::session::ViewResponse;
 use rexrs::api::terminal::ProcessResponse;
 use serde::Serialize;
 
+use crate::guard::Refusal;
 use crate::ids::BlockId;
 use crate::status::{Records, TERMINAL_CREATOR};
 
@@ -175,6 +176,18 @@ pub fn names_claude(name: &str) -> bool {
         || lower.contains("/.claude/local/")
 }
 
+/// Programs that count as a shell at its prompt when they are in the foreground.
+const SHELLS: &[&str] = &[
+    "bash", "zsh", "fish", "sh", "dash", "ksh", "mksh", "yash", "tcsh", "csh", "nu", "elvish",
+    "xonsh", "pwsh", "ion", "osh",
+];
+
+/// Whether a program name or path names a shell. A login shell's `-zsh` counts.
+pub fn names_shell(name: &str) -> bool {
+    let base = name.trim().rsplit('/').next().unwrap_or(name);
+    SHELLS.contains(&base.trim_start_matches('-'))
+}
+
 /// What a pane says about its program.
 #[derive(Debug, Clone, Default)]
 pub struct Evidence {
@@ -218,6 +231,16 @@ impl Evidence {
             return Some("terminal title");
         }
         None
+    }
+
+    /// The shell in the foreground, if the pane is idle at a shell prompt. While a command
+    /// runs, the command is in the foreground instead.
+    pub fn idle_shell(&self) -> Option<&str> {
+        let foreground = self.process.as_ref()?.foreground.as_ref()?;
+        [foreground.argv0.as_deref(), Some(foreground.name.as_str())]
+            .into_iter()
+            .flatten()
+            .find(|name| names_shell(name))
     }
 
     /// A short name for the foreground program, for listings.
@@ -286,6 +309,33 @@ pub fn choose_claude(candidates: &[(Pane, Evidence)]) -> Result<&(Pane, Evidence
             }
             bail!(
                 "more than one pane runs Claude Code{}; pass --block to choose one",
+                describe(many.iter().map(|(p, _)| p))
+            )
+        }
+    }
+}
+
+/// Picks the pane idle at a shell prompt among `candidates`: the only one, or else the focused
+/// one. Panes that are all busy are a refusal, because `run` types only at an idle prompt.
+pub fn choose_shell(candidates: &[(Pane, Evidence)]) -> Result<&(Pane, Evidence)> {
+    let shells: Vec<_> = candidates
+        .iter()
+        .filter(|(_, e)| e.idle_shell().is_some())
+        .collect();
+    match shells.as_slice() {
+        [one] => Ok(one),
+        [] if candidates.is_empty() => bail!("no terminal pane here"),
+        [] => Err(Refusal(format!(
+            "no pane here is idle at a shell prompt{}; wait for it, or name another pane",
+            describe(candidates.iter().map(|(p, _)| p))
+        ))
+        .into()),
+        many => {
+            if let Some(focused) = many.iter().find(|(p, _)| p.focused) {
+                return Ok(focused);
+            }
+            bail!(
+                "more than one pane is idle at a shell prompt{}; name the pane or pass --block",
                 describe(many.iter().map(|(p, _)| p))
             )
         }
@@ -389,6 +439,28 @@ mod tests {
         assert!(find_block(&panes, "a").is_err(), "ambiguous");
         assert!(find_block(&panes, "zzz").is_err());
         assert!(find_block(&panes, "block:").is_err());
+    }
+
+    #[test]
+    fn recognizes_shells_at_their_prompt() {
+        for name in ["zsh", "-zsh", "/bin/bash", "fish", "-sh"] {
+            assert!(names_shell(name), "{name}");
+        }
+        for name in ["claude", "make", "zshrc", "bash-language-server"] {
+            assert!(!names_shell(name), "{name}");
+        }
+        // The real reports: a login zsh at its prompt, and Claude Code under it.
+        let idle = Evidence {
+            process: Some(process("zsh", None)),
+            ..Evidence::default()
+        };
+        assert_eq!(idle.idle_shell(), Some("zsh"));
+        let busy = Evidence {
+            process: Some(process("2.1.318", None)),
+            ..Evidence::default()
+        };
+        assert_eq!(busy.idle_shell(), None);
+        assert_eq!(Evidence::default().idle_shell(), None);
     }
 
     #[test]

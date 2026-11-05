@@ -71,6 +71,9 @@ pub enum Command {
     Send(SendArgs),
     /// Stream a session's Claude Code output until it stops working.
     Wait(WaitArgs),
+    /// Type a command into a shell pane idle at its prompt, wait for the prompt to return, and
+    /// print the new output.
+    Run(RunArgs),
     /// Close a session that rexctl created. Sessions rexctl didn't create are never closed.
     Close {
         /// The session's id (session:…) or current label.
@@ -115,6 +118,24 @@ pub struct SendArgs {
     pub max_bytes: Option<usize>,
     #[command(flatten)]
     pub wait: WaitOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct RunArgs {
+    #[command(flatten)]
+    pub target: Target,
+    /// Use a session rexctl didn't create (one not in the ownership registry).
+    #[arg(long)]
+    pub allow_foreign: bool,
+    /// Lowers the largest command allowed, in bytes, below the config's `max_message_bytes`.
+    #[arg(long, value_name = "BYTES")]
+    pub max_bytes: Option<usize>,
+    #[command(flatten)]
+    pub wait: WaitOptions,
+    /// The command line, after `--`. Its words are joined with spaces and typed as one line,
+    /// as ssh does, so quote anything the shell should see quoted: -- 'ls | wc -l'.
+    #[arg(last = true, required = true, value_name = "COMMAND")]
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Args)]

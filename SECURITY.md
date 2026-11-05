@@ -15,10 +15,12 @@ Treat network access to the Rex port as shell access to the Rex host, for the us
 - `send` types only plain text, only into sessions `rexctl` created (unless `--allow-foreign`),
   and only at Claude Code's input prompt. It never answers a permission prompt or a menu, and it
   never types into a sign-in prompt.
+- `run` types one plain command line, only into a shell idle at its prompt, and only in sessions
+  `rexctl` created (unless `--allow-foreign`).
 - `close` closes only sessions `rexctl` created. No flag overrides that.
 - `rexctl` connects only to endpoints listed in `allowed_endpoints`.
-- Every `new`, `send`, and `close` is logged to the audit log, including refused ones. The log
-  records a message's SHA-256 and length, never its text.
+- Every `new`, `send`, `run`, and `close` is logged to the audit log, including refused ones.
+  The log records a message's or command's SHA-256 and length, never its text.
 
 The README's [guard rails](README.md#guard-rails) section has the details.
 
@@ -30,8 +32,10 @@ The README's [guard rails](README.md#guard-rails) section has the details.
   full power of that Claude Code session, and Claude Code's own permission settings apply.
 - A caller who can edit `rexctl`'s config, registry, or audit log. Those files are created `0600`
   in `0700` directories, so this means the same user or root.
-- `--allow-foreign`, which lets a caller send to any session on the server. Don't give a caller
-  you don't fully trust a way to pass it.
+- What a command does. `run` gives its caller a shell, as the user Rex runs as, in every
+  session `rexctl` created. A caller that may use `run` can do anything that user can.
+- `--allow-foreign`, which lets a caller send to, or run commands in, any session on the
+  server. Don't give a caller you don't fully trust a way to pass it.
 
 ## Deploying safely
 

@@ -71,6 +71,11 @@ struct State {
     input: String,
     /// The input box ignores Ctrl+U.
     sticky_input: bool,
+    /// How many more process reports show a shell pane running a command (`usize::MAX`:
+    /// forever).
+    shell_busy: usize,
+    /// What `shell_busy` becomes when Enter reaches a shell pane.
+    busy_after_enter: usize,
 }
 
 fn screen(body: &[&str]) -> Vec<String> {
@@ -143,6 +148,8 @@ impl Mock {
             after_reconnect: None,
             input: String::new(),
             sticky_input: false,
+            shell_busy: 0,
+            busy_after_enter: 0,
         }));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -579,7 +586,14 @@ fn handle(
                     reply
                 }
                 ".process" => {
-                    Ok(json!({"foreground": {"pid": 7, "user_id": 1000, "name": block.foreground}}))
+                    let mut name = block.foreground;
+                    if name != "claude" && s.shell_busy > 0 {
+                        if s.shell_busy != usize::MAX {
+                            s.shell_busy -= 1;
+                        }
+                        name = "make";
+                    }
+                    Ok(json!({"foreground": {"pid": 7, "user_id": 1000, "name": name}}))
                 }
                 ".title" => Ok(json!({"title": ""})),
                 ".modes" => Ok(json!({"screen": "primary", "modes": [
@@ -592,6 +606,19 @@ fn handle(
                     let data = payload["args"]["data"].as_str().unwrap().to_owned();
                     s.writes.push((sid.clone(), bid.clone(), data.clone()));
                     let reply = Ok(json!({"bytes_written": data.len()}));
+                    if block.foreground != "claude" {
+                        // A shell: typed text joins the prompt line; Enter runs it.
+                        if data == "\r" {
+                            let line = s.screen.last().cloned().unwrap_or_default();
+                            let command = line.strip_prefix("$ ").unwrap_or("").to_owned();
+                            s.screen.push(format!("output of {command}"));
+                            s.screen.push("$ ".into());
+                            s.shell_busy = s.busy_after_enter;
+                        } else if let Some(last) = s.screen.last_mut() {
+                            last.push_str(&data);
+                        }
+                        return (reply, Then::Nothing);
+                    }
                     if data == "\x15" && !s.sticky_input {
                         s.input.clear();
                     }
@@ -1533,6 +1560,107 @@ fn targets_name_tabs_and_panes() {
     let output = mock.rexctl(&["send", "demo:claude", "hi", "--quiet"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert!(mock.writes().iter().all(|w| w.1 == claude_id));
+}
+
+/// The demo session, with the shared screen showing a shell prompt.
+fn shell_demo() -> Mock {
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.state.lock().unwrap().screen = vec!["$ ls".into(), "src".into(), "$ ".into()];
+    mock
+}
+
+#[test]
+fn run_types_into_an_idle_shell_and_prints_the_new_output() {
+    let mock = shell_demo();
+    mock.state.lock().unwrap().busy_after_enter = 3;
+    let output = mock.rexctl(&["run", "demo", "--", "cargo", "test", "--quiet"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    // The session's idle shell, not its Claude Code pane.
+    let shell_id = shell().id;
+    assert_eq!(
+        mock.writes(),
+        [
+            (SID.into(), shell_id.into(), "cargo test --quiet".into()),
+            (SID.into(), shell_id.into(), "\r".into()),
+        ]
+    );
+    let text = stdout(&output);
+    assert!(
+        text.contains("$ cargo test --quiet\noutput of cargo test --quiet\n"),
+        "{text}"
+    );
+    assert!(!text.contains("src"), "the baseline isn't repeated: {text}");
+    assert!(stderr(&output).ends_with("rexctl: Done\n"), "{output:?}");
+
+    let audit = mock.audit();
+    assert_eq!(audit.len(), 2);
+    for entry in &audit {
+        assert_eq!(entry["command"], "run");
+        assert_eq!(entry["block"], shell_id);
+        assert_eq!(entry["msg_len"], 18);
+    }
+    assert_eq!(audit[1]["result"], "done");
+
+    // --quiet prints the tail at the end instead.
+    let output = mock.rexctl(&[
+        "run",
+        "demo:shell",
+        "--quiet",
+        "--lines",
+        "2",
+        "--",
+        "echo hi",
+    ]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(stdout(&output), "output of echo hi\n$\n");
+}
+
+#[test]
+fn run_refuses_panes_that_arent_idle_at_a_shell_prompt() {
+    let mock = shell_demo();
+    // Claude Code's pane, named directly.
+    let output = mock.rexctl(&["run", "demo:claude", "--", "ls"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(
+        stderr(&output).contains("isn't idle at a shell prompt"),
+        "{output:?}"
+    );
+    // The shell is busy running something.
+    mock.state.lock().unwrap().shell_busy = usize::MAX;
+    let output = mock.rexctl(&["run", "demo:shell", "--", "ls"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(
+        stderr(&output).contains("foreground program is make"),
+        "{output:?}"
+    );
+    // No idle shell anywhere in the session.
+    let output = mock.rexctl(&["run", "demo", "--", "ls"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(
+        stderr(&output).contains("no pane here is idle"),
+        "{output:?}"
+    );
+    // Foreign sessions, and commands that aren't one plain line.
+    let output = mock.rexctl(&["run", "work", "--", "ls"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(stderr(&output).contains("--allow-foreign"), "{output:?}");
+    for bad in ["ls\nrm -rf /", "ls\t", "\x03"] {
+        let output = mock.rexctl(&["run", "demo", "--", bad]);
+        assert_eq!(code(&output), 3, "{bad:?}: {output:?}");
+    }
+    assert!(mock.writes().is_empty());
+}
+
+#[test]
+fn run_waits_for_the_prompt_and_times_out() {
+    let mock = shell_demo();
+    mock.state.lock().unwrap().busy_after_enter = usize::MAX;
+    let output = mock.rexctl(&["--json", "run", "demo", "--timeout", "1s", "--", "make"]);
+    assert_eq!(code(&output), 15, "{output:?}");
+    let last = json_lines(&output).pop().unwrap();
+    assert_eq!(last["status"], "timeout");
+    assert_eq!(mock.writes().len(), 2, "typed once");
+    assert_eq!(mock.audit().last().unwrap()["result"], "timeout");
 }
 
 #[test]

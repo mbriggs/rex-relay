@@ -22,6 +22,8 @@ The first release, under the MIT License.
   pane's status, and keeps waiting, and it never types the message again. The status is also
   re-read every 3 seconds, so a missed Done still ends the wait.
 - `--json`, which prints one JSON object per line.
+- `rexctl run <target> -- <command>`, which types one command line into a shell pane idle at its
+  prompt and waits for the prompt to return.
 - An ownership registry that tracks the sessions `new` creates by session id. `send` targets
   only owned sessions unless `--allow-foreign`, and `close` closes only owned sessions.
 - Guard rails. `send` types only plain text, only at Claude Code's input prompt, and never into

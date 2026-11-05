@@ -122,6 +122,7 @@ may no longer work; the id always does. A label that matches more than one sessi
 | `rexctl read <target> [--lines N] [--block ID]` | Prints the pane's last N lines (default 100; 0 for all). |
 | `rexctl new [label] [--cwd DIR] [--cmd claude] [--purpose TEXT]` | Creates a session with the initial label `label` (or one Rex picks), whose one pane runs `--cmd` (default `claude`, with arguments quoted as in a shell, though no shell runs it) in `--cwd`, and records it in the ownership registry. |
 | `rexctl send <target> "msg"` | Pastes the message into the Claude Code pane, presses Enter once, then streams the pane's new output until Claude Code stops. Owned sessions only, unless `--allow-foreign`. |
+| `rexctl run <target> -- <command>` | Types a command line into a shell pane that is idle at its prompt, presses Enter, and streams the new output until the prompt returns. Owned sessions only, unless `--allow-foreign`. See [Running shell commands](#running-shell-commands). |
 | `rexctl wait <target>` | Streams the pane's new output until Claude Code stops working. Returns at once if it isn't working. |
 | `rexctl close <session>` | Closes a session rexctl created, and removes it from the registry. There is no override: other sessions are never closed. |
 
@@ -151,7 +152,7 @@ atomically (write to a temporary file, fsync, rename); the file is `0600`. A reg
 be parsed is an error, never treated as empty. `close` on a registered id that the server no
 longer has removes it from the registry without sending anything.
 
-`send` and `wait` options:
+`send`, `wait`, and `run` options:
 
 - `--timeout DURATION`: how long to wait. Defaults to `30m`, or the config's `timeout`.
 - `--quiet`: don't stream the pane's output or status changes. At the end, print only the last
@@ -224,6 +225,36 @@ began.
 If the connection is still down when `--timeout` runs out, `rexctl` exits 16. In that case
 Claude Code's state is unknown. Check it with `rexctl status` once the server is reachable.
 
+### Running shell commands
+
+`run` is for shell panes, not Claude Code. It picks the pane in the target that is idle at a
+shell prompt, which means the shell (`zsh`, `bash`, `fish`, and so on) is the pane's
+foreground program. It refuses with exit 3 if the target pane, or every pane in the target,
+is busy or runs something else.
+
+The words after `--` are joined with spaces and typed as one line, as `ssh` does. Quote
+anything the shell should see quoted:
+
+```sh
+rexctl run solar-creek:shell -- 'cargo test 2>&1 | tail -20'
+```
+
+The command line follows the same rules as a `send` message: the same size limit, no control
+characters, and the same audit log entries (as `run`, with its hash, never its text). It also
+can't contain a newline or a tab. A newline would run the part before it, and a tab would ask
+the shell to complete a word.
+
+`run` counts the command as finished when the shell is the foreground program again and the
+screen has changed since the command was typed, on two checks in a row. It then exits 0, or 15
+if `--timeout` runs out first. Rex doesn't report a command's exit status, so `run` can't
+either. To check whether a command succeeded, make it print something, such as
+`-- 'make; echo "exit $?"'`. A command line with several commands (`a; b`) could look finished
+in the instant between them. Prefer one command, or `&&`.
+
+`run` can't see text someone typed at the shell prompt without pressing Enter, and its command
+would be added to that text. It also takes `--timeout`, `--quiet`, `--lines`, `--poll`,
+`--allow-foreign`, `--max-bytes`, and `--block`, which work as they do for `send`.
+
 ### Output
 
 Text mode prints the pane's new lines on stdout as they settle, and status notes on stderr.
@@ -278,22 +309,24 @@ and `close` print `session`, `status`, `text`, `created` and `closed` objects.
    while the pane is in Needs approval or Question unless `--answer` says the message is the
    answer. It always refuses while the pane is in Needs sign-in, so it never types into a
    credential prompt.
-4. **Input prompt only.** `send` types only at Claude Code's input prompt, which it finds on the
+4. **Idle shells only.** `run` types only into a shell that is idle at its prompt, never into
+   Claude Code or a running command, and refuses multi-line commands.
+5. **Input prompt only.** `send` types only at Claude Code's input prompt, which it finds on the
    pane's screen. It refuses menus, such as the folder-trust dialog and permission requests, even
    with `--answer`, and it refuses screens it doesn't recognize.
-5. **Text only, bounded.** There are no raw-key or kill commands, and `close` is limited as
+6. **Text only, bounded.** There are no raw-key or kill commands, and `close` is limited as
    above. Messages may contain
    printable text, newline and tab; any other control character (ESC, CR, Ctrl-C, DEL, C1
    controls, NUL) is refused. Messages larger than `max_message_bytes` (default 32 KiB) are
    refused; `--max-bytes` can lower that limit for one call but not raise it.
-6. **Audit log.** Every mutating call (`new`, `send`, `close`), refused ones included, appends a
+7. **Audit log.** Every mutating call (`new`, `send`, `run`, `close`), refused ones included, appends a
    JSON line
    to `~/.local/state/rex-relay/audit.jsonl` (or `$XDG_STATE_HOME/rex-relay/`, or the config's
    `audit_log`): timestamp, command, canonical endpoint, session, block, the message's SHA-256
    and length (never its text), and the result. A delivered `send` writes a `sent` entry, then
    one with the outcome (`done`, `needs_approval`, `timeout`, …). The file is created `0600` in a
    `0700` directory; if it can't be opened, nothing is sent. No credentials are logged.
-7. **Endpoint allowlist.** Only endpoints in `allowed_endpoints` are contacted; there is no
+8. **Endpoint allowlist.** Only endpoints in `allowed_endpoints` are contacted; there is no
    hardcoded endpoint.
 
 These rails limit what `rexctl` does. They don't limit other clients of the Rex server. Read

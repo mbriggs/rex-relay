@@ -46,6 +46,16 @@ pub fn check_message(message: &str, max_bytes: usize) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// A command for `run`: what `send` accepts, on one line. A newline would run the part before
+/// it, and a tab would ask the shell to complete a word.
+pub fn check_command(command: &str, max_bytes: usize) -> Result<(), Refusal> {
+    check_message(command, max_bytes)?;
+    if command.contains(['\n', '\t']) {
+        return refuse("command contains a newline or tab; run takes one line");
+    }
+    Ok(())
+}
+
 /// Labels for new sessions: plain text, within Rex's 128-character limit.
 pub fn check_label(label: &str) -> Result<(), Refusal> {
     if label.trim().is_empty() {
@@ -86,7 +96,7 @@ pub fn check_send_owned(
         return Ok(());
     }
     refuse(format!(
-        "session {label:?} ({session}) wasn't created by rexctl on this endpoint; pass --allow-foreign to send to it anyway"
+        "session {label:?} ({session}) wasn't created by rexctl on this endpoint; pass --allow-foreign to use it anyway"
     ))
 }
 
@@ -178,6 +188,14 @@ mod tests {
         }
         assert!(check_message(&"x".repeat(33), 32).is_err());
         check_message(&"x".repeat(32), 32).unwrap();
+    }
+
+    #[test]
+    fn commands_are_one_line() {
+        check_command("cargo test -- --nocapture", 1024).unwrap();
+        for bad in ["ls\nrm -rf x", "ls\t", "ls\r", "\x03", ""] {
+            assert!(check_command(bad, 1024).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
