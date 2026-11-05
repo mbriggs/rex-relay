@@ -20,3 +20,6 @@ pub const NEEDS_SIGN_IN: i32 = 13;
 pub const PROGRAM_ERROR: i32 = 14;
 /// The program didn't stop before `--timeout`.
 pub const TIMEOUT: i32 = 15;
+/// `send` or `wait` lost its connection to the server and couldn't restore it before
+/// `--timeout`. The program's state is unknown.
+pub const LOST_CONNECTION: i32 = 16;

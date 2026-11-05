@@ -17,11 +17,10 @@ pub const MIN_API_REVISION: u32 = 7;
 pub const API_REVISION: u32 = 8;
 /// Program status (`program_status` and its events) needs revision 8.
 pub const STATUS_API_REVISION: u32 = 8;
-/// How long connecting and each call may take.
-pub const CALL_TIMEOUT: Duration = Duration::from_secs(20);
-
 pub struct Rex {
     client: RexClient<Transport>,
+    /// How long connecting and each call may take before the connection counts as stalled.
+    call_timeout: Duration,
 }
 
 /// A session on the server.
@@ -39,13 +38,23 @@ pub struct Created {
 }
 
 impl Rex {
-    pub fn connect(endpoint: &Endpoint) -> Result<Self> {
-        let transport = transport::connect(endpoint, rexrs::CONTROL_PATH, CALL_TIMEOUT)?;
-        let client = RexClient::builder()
+    /// Connects, waiting at most `call_timeout` for each step and each later call. `resume` is
+    /// the reconnect token of an earlier connection, to continue its client.
+    pub fn connect(
+        endpoint: &Endpoint,
+        call_timeout: Duration,
+        resume: Option<&str>,
+    ) -> Result<Self> {
+        let transport = transport::connect(endpoint, rexrs::CONTROL_PATH, call_timeout)?;
+        let mut builder = RexClient::builder()
             .name("rex-relay")
             .version(env!("CARGO_PKG_VERSION"))
             .kind(ClientKind::Cli)
-            .api_revisions(MIN_API_REVISION..=API_REVISION)
+            .api_revisions(MIN_API_REVISION..=API_REVISION);
+        if let Some(token) = resume {
+            builder = builder.reconnect_token(token);
+        }
+        let client = builder
             .connect_with(transport)
             .with_context(|| format!("greeting {endpoint}"))?;
         let revision = client.welcome().api_revision;
@@ -54,7 +63,19 @@ impl Rex {
                 "{endpoint} speaks control API revision {revision}; rexctl needs revision {STATUS_API_REVISION} for program status"
             );
         }
-        Ok(Rex { client })
+        Ok(Rex {
+            client,
+            call_timeout,
+        })
+    }
+
+    /// The token a later connection passes to continue this client. Never log it.
+    pub fn reconnect_token(&self) -> Option<String> {
+        self.client
+            .welcome()
+            .client
+            .as_ref()
+            .map(|c| c.reconnect_token.clone())
     }
 
     fn set_read_timeout(&mut self, timeout: Duration) -> Result<()> {
@@ -244,7 +265,7 @@ impl Rex {
     pub fn next_event(&mut self, wait: Duration) -> Result<Option<Event>> {
         self.set_read_timeout(wait)?;
         let result = self.client.next_event();
-        self.set_read_timeout(CALL_TIMEOUT)?;
+        self.set_read_timeout(self.call_timeout)?;
         match result {
             Ok(event) => Ok(Some(event)),
             Err(rexrs::Error::TimedOut) => Ok(None),
@@ -252,7 +273,20 @@ impl Rex {
         }
     }
 
+    /// Ends the connection with a close handshake. Don't call this on a connection that has
+    /// stalled: the handshake waits for the server. Drop the `Rex` instead.
     pub fn close(self) {
         let _ = self.client.close();
     }
+}
+
+/// Whether `error` means the connection stalled or broke, as opposed to the server answering
+/// with an error. A watch reconnects after the first kind and stops on the second.
+pub fn is_connection_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rexrs::Error>(),
+            Some(rexrs::Error::TimedOut | rexrs::Error::Transport(_) | rexrs::Error::Closed { .. })
+        ) || cause.downcast_ref::<std::io::Error>().is_some()
+    })
 }

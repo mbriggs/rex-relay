@@ -61,6 +61,9 @@ pub struct Record {
     pub kind: Option<BlockedKind>,
     pub app: Option<String>,
     pub msg: Option<String>,
+    /// When the program made the report. A program that finishes twice reports Done twice,
+    /// so this is what tells the second Done from the first.
+    pub updated_at: Option<String>,
 }
 
 impl Record {
@@ -76,6 +79,7 @@ impl Record {
             kind: BlockedKind::parse(value["kind"].as_str()),
             app: text("effective_app").or_else(|| text("app")),
             msg: text("msg").or_else(|| text("title")),
+            updated_at: text("updated_at"),
         }
     }
 }
@@ -412,9 +416,10 @@ mod tests {
             exit::ERROR,
             exit::REFUSED,
             exit::USAGE,
+            exit::LOST_CONNECTION,
         ])
         .collect();
-        assert_eq!(codes.len(), 10);
+        assert_eq!(codes.len(), 11);
         assert_eq!(Status::Done.exit_code(), 0);
     }
 

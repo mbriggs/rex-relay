@@ -9,6 +9,7 @@ use serde::Deserialize;
 pub const DEFAULT_LABEL_PREFIX: &str = "grokbot-";
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 32 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Names a config file to use instead of the default location.
 pub const CONFIG_ENV: &str = "REX_RELAY_CONFIG";
 /// The endpoint variable that a Rex server sets in its terminals.
@@ -29,6 +30,9 @@ pub struct Config {
     pub max_message_bytes: Option<usize>,
     /// How long `send` and `wait` wait by default, such as `30m`.
     pub timeout: Option<String>,
+    /// How long one call to the server may take before the connection counts as stalled,
+    /// such as `10s`. `send` and `wait` then reconnect.
+    pub call_timeout: Option<String>,
     /// Where the audit log goes. Defaults to `$XDG_STATE_HOME/rex-relay/audit.jsonl`.
     pub audit_log: Option<PathBuf>,
     /// Where the registry of sessions `new` created goes. Defaults to
@@ -63,6 +67,13 @@ impl Config {
             humantime::parse_duration(timeout)
                 .with_context(|| format!("invalid timeout {timeout:?}"))?;
         }
+        if let Some(timeout) = &self.call_timeout {
+            let parsed = humantime::parse_duration(timeout)
+                .with_context(|| format!("invalid call_timeout {timeout:?}"))?;
+            if parsed.is_zero() {
+                bail!("call_timeout must be positive");
+            }
+        }
         Ok(())
     }
 
@@ -79,6 +90,13 @@ impl Config {
             .as_deref()
             .and_then(|t| humantime::parse_duration(t).ok())
             .unwrap_or(DEFAULT_TIMEOUT)
+    }
+
+    pub fn call_timeout(&self) -> Duration {
+        self.call_timeout
+            .as_deref()
+            .and_then(|t| humantime::parse_duration(t).ok())
+            .unwrap_or(DEFAULT_CALL_TIMEOUT)
     }
 
     pub fn audit_log(&self) -> Result<PathBuf> {
@@ -204,6 +222,7 @@ mod tests {
         assert_eq!(config.label_prefix(), "grokbot-");
         assert_eq!(config.max_message_bytes(), 32 * 1024);
         assert_eq!(config.timeout(), Duration::from_secs(1800));
+        assert_eq!(config.call_timeout(), Duration::from_secs(10));
         assert!(config.allowed_endpoints.is_empty());
     }
 
@@ -214,6 +233,7 @@ mod tests {
             "label_prefix = \"\"",
             "max_message_bytes = 0",
             "timeout = \"soon\"",
+            "call_timeout = \"0s\"",
         ] {
             let config: Config = toml::from_str(bad).unwrap();
             assert!(config.validate().is_err(), "{bad}");

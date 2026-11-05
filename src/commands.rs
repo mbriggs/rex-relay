@@ -17,11 +17,12 @@ use crate::output::{DEFAULT_HOLDBACK, Pump};
 use crate::pane::{self, Evidence, Pane};
 use crate::prompt;
 use crate::registry::{Owned, Registry};
-use crate::rex::{Rex, Session};
+use crate::rex::{self, Rex, Session};
 use crate::status::{self, Records, Status, Tracker};
 
-/// How often `send` and `wait` re-read the status in case an event was missed.
-const STATUS_POLL: Duration = Duration::from_secs(5);
+/// How often `send` and `wait` re-read the status, events or not. This catches a missed
+/// event, and the round trip is also what notices a connection that went quiet.
+const STATUS_POLL: Duration = Duration::from_secs(3);
 /// The pause between pasting a message and pressing Enter, so the program has taken in the
 /// paste before Enter arrives.
 const ENTER_DELAY: Duration = Duration::from_millis(250);
@@ -78,7 +79,7 @@ struct Ctx {
 
 impl Ctx {
     fn connect(&self) -> Result<Rex> {
-        Rex::connect(&self.endpoint)
+        Rex::connect(&self.endpoint, self.config.call_timeout(), None)
     }
 
     /// The endpoint in canonical form, as the registry and the audit log record it.
@@ -561,9 +562,7 @@ impl<'a> SendAttempt<'a> {
             tracker: Tracker::after_send(initial),
             pump,
         };
-        let outcome = watch.run(&mut rex, out, &args.wait, timeout(ctx, &args.wait));
-        rex.close();
-        outcome
+        watch.run(rex, ctx, out, &args.wait)
     }
 }
 
@@ -587,8 +586,7 @@ fn wait(ctx: &Ctx, out: &Out, args: &WaitArgs) -> Result<i32> {
         tracker,
         pump,
     };
-    let outcome = watch.run(&mut rex, out, &args.wait, timeout(ctx, &args.wait));
-    rex.close();
+    let outcome = watch.run(rex, ctx, out, &args.wait);
     Ok(finish(out, outcome?))
 }
 
@@ -599,8 +597,17 @@ fn timeout(ctx: &Ctx, options: &WaitOptions) -> Duration {
 /// How `send` or `wait` ended.
 #[derive(Debug, Clone)]
 enum Outcome {
-    Stopped { status: Status, msg: Option<String> },
-    TimedOut { status: Status },
+    Stopped {
+        status: Status,
+        msg: Option<String>,
+    },
+    TimedOut {
+        status: Status,
+    },
+    /// The connection broke and couldn't be restored before the timeout.
+    LostConnection {
+        status: Status,
+    },
 }
 
 impl Outcome {
@@ -608,6 +615,7 @@ impl Outcome {
         match self {
             Outcome::Stopped { status, .. } => status.as_str(),
             Outcome::TimedOut { .. } => "timeout",
+            Outcome::LostConnection { .. } => "lost_connection",
         }
     }
 }
@@ -646,10 +654,117 @@ fn finish(out: &Out, outcome: Outcome) -> i32 {
             }
             exit::TIMEOUT
         }
+        Outcome::LostConnection { status } => {
+            if out.json {
+                out.event(json!({
+                    "type": "result",
+                    "status": "lost_connection",
+                    "label": "Lost connection",
+                    "last_status": status,
+                    "exit_code": exit::LOST_CONNECTION,
+                }));
+            } else {
+                out.note(&format!(
+                    "lost the connection to the server and couldn't reconnect before the timeout (last status: {})",
+                    status.label()
+                ));
+            }
+            exit::LOST_CONNECTION
+        }
     }
 }
 
+/// A watch's connection to the server, which the watch replaces when it stalls or breaks.
+struct Link<'a> {
+    endpoint: &'a Endpoint,
+    call_timeout: Duration,
+    rex: Option<Rex>,
+    /// Continues the same client on the server after a reconnect.
+    token: Option<String>,
+    /// Failed reconnect attempts since the connection was lost.
+    failures: u32,
+    /// When to try to reconnect next.
+    retry_at: Instant,
+}
+
+impl<'a> Link<'a> {
+    fn new(rex: Rex, ctx: &'a Ctx) -> Self {
+        Link {
+            endpoint: &ctx.endpoint,
+            call_timeout: ctx.config.call_timeout(),
+            token: rex.reconnect_token(),
+            rex: Some(rex),
+            failures: 0,
+            retry_at: Instant::now(),
+        }
+    }
+
+    /// Drops a connection that stalled or broke. There's no close handshake, because it would
+    /// wait on the server. The first reconnect attempt is immediate.
+    fn lose(&mut self) {
+        self.rex = None;
+        self.failures = 0;
+        self.retry_at = Instant::now();
+    }
+
+    fn failed(&mut self) {
+        self.failures += 1;
+        self.retry_at = Instant::now() + backoff(self.failures);
+    }
+
+    fn restore(&mut self, rex: Rex) {
+        if let Some(token) = rex.reconnect_token() {
+            self.token = Some(token);
+        }
+        self.rex = Some(rex);
+        self.failures = 0;
+    }
+
+    fn close(self) {
+        if let Some(rex) = self.rex {
+            rex.close();
+        }
+    }
+}
+
+/// The pause after the `failures`th failed reconnect attempt: 1s, 2s, 4s, then 8s.
+fn backoff(failures: u32) -> Duration {
+    Duration::from_secs(1 << failures.saturating_sub(1).min(3))
+}
+
+/// The server said the watched session or pane no longer exists. Reconnecting won't help.
+#[derive(Debug)]
+struct Gone(&'static str);
+
+impl std::fmt::Display for Gone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Gone {}
+
+/// Whether a failed reconnect means the server answered, so that retrying can't help.
+fn server_answered(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.is::<Gone>()
+            || matches!(
+                cause.downcast_ref::<rexrs::Error>(),
+                Some(rexrs::Error::Api(_))
+            )
+    })
+}
+
+/// When the watch next reads the pane's text and status, and when it gives up.
+struct Clock {
+    deadline: Instant,
+    poll: Duration,
+    next_read: Instant,
+    next_status: Instant,
+}
+
 /// Follows one pane until its program stops: applies its status events, streams its text.
+/// It only reads. Nothing it does after a reconnect can type into the pane.
 struct Watch {
     sid: SessionId,
     bid: BlockId,
@@ -661,18 +776,28 @@ struct Watch {
 }
 
 impl Watch {
-    fn run(
+    fn run(self, rex: Rex, ctx: &Ctx, out: &Out, options: &WaitOptions) -> Result<Outcome> {
+        let mut link = Link::new(rex, ctx);
+        let result = self.follow(&mut link, out, options, timeout(ctx, options));
+        link.close();
+        result
+    }
+
+    fn follow(
         mut self,
-        rex: &mut Rex,
+        link: &mut Link,
         out: &Out,
         options: &WaitOptions,
         timeout: Duration,
     ) -> Result<Outcome> {
         let start = Instant::now();
-        let deadline = start + timeout;
         let poll = options.poll.max(Duration::from_millis(100));
-        let mut next_read = start + poll;
-        let mut next_status = start + STATUS_POLL;
+        let mut clock = Clock {
+            deadline: start + timeout,
+            poll,
+            next_read: start + poll,
+            next_status: start + STATUS_POLL,
+        };
         let mut shown = self.tracker.current();
         if out.json {
             out.event(self.status_event(shown));
@@ -680,46 +805,113 @@ impl Watch {
         let mut finished = self.tracker.settled_now();
         while finished.is_none() {
             let now = Instant::now();
-            if now >= deadline {
-                self.flush(rex, out)?;
-                return Ok(Outcome::TimedOut {
-                    status: self.tracker.current(),
-                });
-            }
-            if self.pump.is_some() && now >= next_read {
-                let text = rex.read_text(&self.sid, &self.bid)?;
-                if let Some(pump) = &mut self.pump {
-                    print_lines(out, pump.update(&text));
+            if now >= clock.deadline {
+                let status = self.tracker.current();
+                if link.rex.is_none() {
+                    return Ok(Outcome::LostConnection { status });
                 }
-                next_read = now + poll;
+                self.flush(link, out);
+                return Ok(Outcome::TimedOut { status });
             }
-            if now >= next_status {
-                let (seq, fresh) = rex.program_status(&self.sid, &self.bid)?;
-                self.seq = self.seq.max(seq);
-                if fresh != self.records {
-                    self.records = fresh;
-                    finished = self.changed(out, &mut shown);
+            let Some(rex) = link.rex.as_mut() else {
+                if now < link.retry_at {
+                    std::thread::sleep(link.retry_at.min(clock.deadline) - now);
+                    continue;
                 }
-                next_status = now + STATUS_POLL;
+                finished = self.resume(link, out, &mut shown)?;
+                clock.next_status = Instant::now() + STATUS_POLL;
                 continue;
-            }
-            let mut until = deadline.min(next_status);
-            if self.pump.is_some() {
-                until = until.min(next_read);
-            }
-            let wait = until
-                .saturating_duration_since(Instant::now())
-                .max(Duration::from_millis(10));
-            if let Some(event) = rex.next_event(wait)? {
-                finished = self.handle(&event, out, &mut shown)?;
+            };
+            match self.step(rex, &mut clock, out, &mut shown) {
+                Ok(done) => finished = done,
+                Err(error) if rex::is_connection_error(&error) => {
+                    connection_note(out, "lost", &format!("{error:#}"));
+                    link.lose();
+                }
+                Err(error) => return Err(error),
             }
         }
-        self.flush(rex, out)?;
-        let status = finished.unwrap_or_default();
+        self.flush(link, out);
         Ok(Outcome::Stopped {
-            status,
+            status: finished.unwrap_or_default(),
             msg: self.records.msg().map(str::to_owned),
         })
+    }
+
+    /// One turn on a live connection: read the text or the status if due, else wait for an
+    /// event.
+    fn step(
+        &mut self,
+        rex: &mut Rex,
+        clock: &mut Clock,
+        out: &Out,
+        shown: &mut Status,
+    ) -> Result<Option<Status>> {
+        let now = Instant::now();
+        if self.pump.is_some() && now >= clock.next_read {
+            let text = rex.read_text(&self.sid, &self.bid)?;
+            if let Some(pump) = &mut self.pump {
+                print_lines(out, pump.update(&text));
+            }
+            clock.next_read = now + clock.poll;
+        }
+        if now >= clock.next_status {
+            let (seq, fresh) = rex.program_status(&self.sid, &self.bid)?;
+            clock.next_status = now + STATUS_POLL;
+            self.seq = self.seq.max(seq);
+            if fresh != self.records {
+                self.records = fresh;
+                return Ok(self.changed(out, shown));
+            }
+            return Ok(None);
+        }
+        let mut until = clock.deadline.min(clock.next_status);
+        if self.pump.is_some() {
+            until = until.min(clock.next_read);
+        }
+        let wait = until
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(10));
+        match rex.next_event(wait)? {
+            Some(event) => self.handle(&event, out, shown),
+            None => Ok(None),
+        }
+    }
+
+    /// Reconnects, joins the session again for its events, and re-reads the pane's status,
+    /// since anything reported while disconnected was missed. A failed attempt schedules the
+    /// next one. Errors only when the server says the session or pane is gone.
+    fn resume(&mut self, link: &mut Link, out: &Out, shown: &mut Status) -> Result<Option<Status>> {
+        let attempt = || -> Result<(Rex, u64, Records)> {
+            let mut rex = Rex::connect(link.endpoint, link.call_timeout, link.token.as_deref())?;
+            let (_, view) = rex.attach(&self.sid)?;
+            if !pane::panes(&view).iter().any(|p| p.block_id == self.bid) {
+                return Err(Gone("the pane was closed").into());
+            }
+            let (seq, records) = rex.program_status(&self.sid, &self.bid)?;
+            Ok((rex, seq, records))
+        };
+        match attempt() {
+            Ok((rex, seq, records)) => {
+                link.restore(rex);
+                connection_note(out, "restored", "reconnected");
+                // Events from the new connection up to `seq` are already in `records`.
+                self.seq = seq;
+                if records != self.records {
+                    self.records = records;
+                    return Ok(self.changed(out, shown));
+                }
+                Ok(None)
+            }
+            Err(error) if server_answered(&error) => Err(error),
+            Err(error) => {
+                link.failed();
+                if link.failures == 1 {
+                    connection_note(out, "retrying", &format!("{error:#}"));
+                }
+                Ok(None)
+            }
+        }
     }
 
     fn handle(
@@ -783,16 +975,25 @@ impl Watch {
         })
     }
 
-    /// Prints whatever output is left.
-    fn flush(&mut self, rex: &mut Rex, out: &Out) -> Result<()> {
-        if self.pump.is_none() {
-            return Ok(());
+    /// Prints whatever output is left, if the connection is up. The outcome matters more than
+    /// the last lines, so a failed read is only noted.
+    fn flush(&mut self, link: &mut Link, out: &Out) {
+        let (Some(rex), Some(pump)) = (link.rex.as_mut(), self.pump.as_mut()) else {
+            return;
+        };
+        match rex.read_text(&self.sid, &self.bid) {
+            Ok(text) => print_lines(out, pump.finish(&text)),
+            Err(error) => out.note(&format!("couldn't read the pane's last output: {error:#}")),
         }
-        let text = rex.read_text(&self.sid, &self.bid)?;
-        if let Some(pump) = &mut self.pump {
-            print_lines(out, pump.finish(&text));
-        }
-        Ok(())
+    }
+}
+
+/// Reports a change in the connection: `lost`, `retrying`, or `restored`.
+fn connection_note(out: &Out, state: &str, message: &str) {
+    if out.json {
+        out.event(json!({"type": "connection", "state": state, "message": message}));
+    } else {
+        out.note(&format!("connection {state}: {message}"));
     }
 }
 

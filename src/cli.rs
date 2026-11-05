@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
     about = "Drive Claude Code panes in Rex sessions, with guard rails",
     after_help = "Exit codes: 0 done/ok, 1 error, 2 usage, 3 refused by a guard rail, \
                   10 needs approval, 11 question, 12 needs input, 13 needs sign-in, \
-                  14 program error, 15 timeout."
+                  14 program error, 15 timeout, 16 lost connection."
 )]
 pub struct Cli {
     /// The Rex server, such as https://rex-host.example.ts.net. Overrides REX_SERVER and the

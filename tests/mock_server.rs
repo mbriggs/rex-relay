@@ -4,7 +4,7 @@
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rex_relay::registry::{Owned, Registry};
@@ -20,12 +20,27 @@ const BOX: [&str; 4] = [
     "  ? for shortcuts",
 ];
 
-/// What the fake Claude Code does once Enter arrives.
+/// What the fake Claude Code, and the fake server's connection, do once Enter arrives. Each
+/// but `StallThenDone` starts by reporting Working.
 #[derive(Clone, Copy, Debug)]
 enum AfterEnter {
     Done,
     Blocked(&'static str),
     KeepWorking,
+    /// Works and finishes, but the event stream has stopped, so no event arrives: only a
+    /// status read shows the new Done.
+    StallThenDone,
+    /// Drops the connection and finishes before the client is back. The next `refuse`
+    /// connection attempts fail.
+    DropThenDone {
+        refuse: usize,
+    },
+    /// Drops the connection, and finishes with an event once the client has reconnected.
+    DropThenDoneEvent,
+    /// Stops answering on this connection, without closing it, and finishes.
+    FreezeThenDone,
+    /// Drops the connection and refuses every later one.
+    DropForever,
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +59,12 @@ struct State {
     created: Vec<Value>,
     /// Every method called, in order.
     methods: Vec<String>,
+    /// Every hello, one per connection that got as far as the protocol.
+    hellos: Vec<Value>,
+    /// How many upcoming connections to drop before the WebSocket handshake.
+    refuse: usize,
+    /// A record to report as an event once a reconnected client reads the status.
+    after_reconnect: Option<(String, String, Value)>,
 }
 
 fn screen(body: &[&str]) -> Vec<String> {
@@ -52,6 +73,15 @@ fn screen(body: &[&str]) -> Vec<String> {
         .chain(&BOX)
         .map(|s| s.to_string())
         .collect()
+}
+
+/// A record with a fresh `updated_at`, as a program makes for each new report.
+fn fresh(state: &str, kind: Option<&str>, msg: Option<&str>) -> Value {
+    static REPORTS: AtomicU64 = AtomicU64::new(1);
+    let mut r = record(state, kind, msg);
+    let n = REPORTS.fetch_add(1, Ordering::SeqCst);
+    r["updated_at"] = json!(format!("2026-11-04T01:00:00.{n:06}Z"));
+    r
 }
 
 fn record(state: &str, kind: Option<&str>, msg: Option<&str>) -> Value {
@@ -102,6 +132,9 @@ impl Mock {
             writes: vec![],
             created: vec![],
             methods: vec![],
+            hellos: vec![],
+            refuse: 0,
+            after_reconnect: None,
         }));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -138,16 +171,24 @@ impl Mock {
     }
 
     fn write_config(&self, allowed: &[&str]) {
+        self.write_config_with(allowed, "");
+    }
+
+    fn write_config_with(&self, allowed: &[&str], extra: &str) {
         let allowed: Vec<String> = allowed.iter().map(|a| format!("{a:?}")).collect();
         std::fs::write(
             self.config_path(),
             format!(
-                "allowed_endpoints = [{}]\naudit_log = {:?}\n",
+                "allowed_endpoints = [{}]\naudit_log = {:?}\n{extra}",
                 allowed.join(", "),
                 self.audit_path().display().to_string()
             ),
         )
         .unwrap();
+    }
+
+    fn hellos(&self) -> Vec<Value> {
+        self.state.lock().unwrap().hellos.clone()
     }
 
     fn rexctl(&self, args: &[&str]) -> Output {
@@ -257,6 +298,17 @@ impl Conn {
         self.socket.send(Message::text(value.to_string())).unwrap();
     }
 
+    /// Reports a new status record: stores it, then sends the event.
+    fn report(&mut self, state: &Mutex<State>, session: &str, block: &str, record: Value) {
+        set_records(state, session, block, record.clone());
+        self.block_event(
+            session,
+            block,
+            "program_status_changed",
+            json!({"id": "", "record": record, "reason": "report"}),
+        );
+    }
+
     fn block_event(&mut self, session: &str, block: &str, name: &str, payload: Value) {
         self.seq += 1;
         let seq = self.seq;
@@ -278,7 +330,26 @@ fn accept_control(_: &Request, mut response: Response) -> Result<Response, Error
     Ok(response)
 }
 
+/// Stores `record` as the pane's only record, as a status read would return it.
+fn set_records(state: &Mutex<State>, session: &str, block: &str, record: Value) {
+    let mut state = state.lock().unwrap();
+    let blocks = &mut state
+        .sessions
+        .iter_mut()
+        .find(|s| s.0 == session)
+        .unwrap()
+        .2;
+    blocks.iter_mut().find(|b| b.id == block).unwrap().records = vec![record];
+}
+
 fn serve(stream: std::net::TcpStream, state: Arc<Mutex<State>>) {
+    {
+        let mut s = state.lock().unwrap();
+        if s.refuse > 0 {
+            s.refuse -= 1;
+            return;
+        }
+    }
     let Ok(socket) = tungstenite::accept_hdr(stream, accept_control) else {
         return;
     };
@@ -289,9 +360,15 @@ fn serve(stream: std::net::TcpStream, state: Arc<Mutex<State>>) {
     let hello: Value = serde_json::from_str(hello.as_str()).unwrap();
     assert_eq!(hello["type"], "hello");
     assert_eq!(hello["api_revision"], 8);
+    let reconnected = {
+        let mut s = state.lock().unwrap();
+        s.hellos.push(hello);
+        s.hellos.len() > 1
+    };
     conn.send(json!({
         "type": "welcome", "protocol": "rex.control.v1",
         "limits": {"max_message_bytes": 1048576},
+        "client": {"id": "client:1", "reconnect_token": "token-1", "resumed": reconnected},
         "api_revision": 8, "api_server_revision": 8, "api_min_revision": 7,
     }));
     loop {
@@ -304,7 +381,7 @@ fn serve(stream: std::net::TcpStream, state: Arc<Mutex<State>>) {
         let id = request["id"].clone();
         let method = request["method"].as_str().unwrap().to_owned();
         let payload = &request["payload"];
-        let (reply, then) = handle(&state, &method, payload);
+        let (reply, then) = handle(&state, &method, payload, reconnected);
         let seq = conn.seq;
         match reply {
             Ok(value) => {
@@ -313,37 +390,64 @@ fn serve(stream: std::net::TcpStream, state: Arc<Mutex<State>>) {
             Err(message) => conn.send(json!({"type": "response", "id": id, "seq": seq,
                 "error": {"code": "not_found", "message": message, "status": 404}})),
         }
-        if let Some((session, block, after)) = then {
-            conn.block_event(
-                &session,
-                &block,
-                "program_status_changed",
-                json!({"id": "", "record": record("working", None, None), "reason": "report"}),
-            );
-            let final_record = match after {
-                AfterEnter::Done => Some(record("done", None, None)),
-                AfterEnter::Blocked(kind) => Some(record(
-                    "blocked",
-                    Some(kind),
-                    Some("Allow Bash(cargo test)?"),
-                )),
-                AfterEnter::KeepWorking => None,
-            };
-            if let Some(r) = final_record {
-                conn.block_event(
-                    &session,
-                    &block,
-                    "program_status_changed",
-                    json!({"id": "", "record": r, "reason": "report"}),
-                );
+        match then {
+            Then::Nothing => {}
+            Then::Report(session, block, r) => conn.report(&state, &session, &block, r),
+            Then::Enter(session, block, after) => {
+                if !matches!(after, AfterEnter::StallThenDone) {
+                    conn.report(&state, &session, &block, fresh("working", None, None));
+                }
+                match after {
+                    AfterEnter::Done => {
+                        conn.report(&state, &session, &block, fresh("done", None, None));
+                    }
+                    AfterEnter::Blocked(kind) => {
+                        let r = fresh("blocked", Some(kind), Some("Allow Bash(cargo test)?"));
+                        conn.report(&state, &session, &block, r);
+                    }
+                    AfterEnter::KeepWorking => {}
+                    AfterEnter::StallThenDone => {
+                        set_records(&state, &session, &block, fresh("done", None, None));
+                    }
+                    AfterEnter::DropThenDone { refuse } => {
+                        set_records(&state, &session, &block, fresh("done", None, None));
+                        state.lock().unwrap().refuse = refuse;
+                        return;
+                    }
+                    AfterEnter::DropThenDoneEvent => {
+                        state.lock().unwrap().after_reconnect =
+                            Some((session, block, fresh("done", None, None)));
+                        return;
+                    }
+                    AfterEnter::FreezeThenDone => {
+                        set_records(&state, &session, &block, fresh("done", None, None));
+                        // Hold the socket open and answer nothing.
+                        std::thread::sleep(std::time::Duration::from_secs(60));
+                        return;
+                    }
+                    AfterEnter::DropForever => {
+                        state.lock().unwrap().refuse = usize::MAX;
+                        return;
+                    }
+                }
             }
         }
     }
 }
 
-type Then = Option<(String, String, AfterEnter)>;
+/// What the server does after it replies.
+enum Then {
+    Nothing,
+    Enter(String, String, AfterEnter),
+    Report(String, String, Value),
+}
 
-fn handle(state: &Mutex<State>, method: &str, payload: &Value) -> (Result<Value, String>, Then) {
+fn handle(
+    state: &Mutex<State>,
+    method: &str,
+    payload: &Value,
+    reconnected: bool,
+) -> (Result<Value, String>, Then) {
     let mut s = state.lock().unwrap();
     s.methods.push(method.to_owned());
     let sessions: Vec<Value> = s
@@ -402,10 +506,16 @@ fn handle(state: &Mutex<State>, method: &str, payload: &Value) -> (Result<Value,
         }
         m if m.starts_with(TERMINAL) => {
             let Some(block) = block else {
-                return (Err("no such block".into()), None);
+                return (Err("no such block".into()), Then::Nothing);
             };
             match &m[TERMINAL.len()..] {
-                ".program_status" => Ok(json!({"records": block.records})),
+                ".program_status" => {
+                    let reply = Ok(json!({"records": block.records}));
+                    if reconnected && let Some((sid, bid, r)) = s.after_reconnect.take() {
+                        return (reply, Then::Report(sid, bid, r));
+                    }
+                    reply
+                }
                 ".process" => {
                     Ok(json!({"foreground": {"pid": 7, "user_id": 1000, "name": block.foreground}}))
                 }
@@ -424,7 +534,7 @@ fn handle(state: &Mutex<State>, method: &str, payload: &Value) -> (Result<Value,
                             "● Fixed it.",
                             "  Updated src/lib.rs",
                         ]);
-                        return (reply, Some((sid, bid, s.after_enter)));
+                        return (reply, Then::Enter(sid, bid, s.after_enter));
                     }
                     reply
                 }
@@ -433,7 +543,7 @@ fn handle(state: &Mutex<State>, method: &str, payload: &Value) -> (Result<Value,
         }
         _ => Err(format!("unknown method {method}")),
     };
-    (reply, None)
+    (reply, Then::Nothing)
 }
 
 // ---- Tests ----
@@ -503,6 +613,102 @@ fn send_pastes_streams_and_exits_done() {
     }
     let raw = std::fs::read_to_string(mock.audit_path()).unwrap();
     assert!(!raw.contains("fix the bug"));
+}
+
+/// `send` with JSON output, waiting at most `timeout`.
+fn send_json(mock: &Mock, timeout: &str) -> (Output, Vec<Value>) {
+    let output = mock.rexctl(&[
+        "--json",
+        "send",
+        "grokbot-demo",
+        "go",
+        "--quiet",
+        "--timeout",
+        timeout,
+    ]);
+    let events = json_lines(&output);
+    (output, events)
+}
+
+fn connection_states(events: &[Value]) -> Vec<&str> {
+    events
+        .iter()
+        .filter(|e| e["type"] == "connection")
+        .map(|e| e["state"].as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn send_catches_done_by_polling_when_events_stop() {
+    // The pane was already Done before the message; only the new report's time tells them
+    // apart.
+    let mock = demo(vec![record("done", None, None)], AfterEnter::StallThenDone);
+    let (output, events) = send_json(&mock, "20s");
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(events.last().unwrap()["status"], "done");
+    assert!(connection_states(&events).is_empty(), "{events:?}");
+    assert_eq!(mock.writes().len(), 2);
+}
+
+#[test]
+fn send_reconnects_after_a_drop_and_follows_events_on_the_new_connection() {
+    let mock = demo(vec![], AfterEnter::DropThenDoneEvent);
+    let (output, events) = send_json(&mock, "20s");
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(connection_states(&events), ["lost", "restored"]);
+    assert_eq!(events.last().unwrap()["status"], "done");
+    // The new connection continues the old client and joins the session again.
+    let hellos = mock.hellos();
+    assert_eq!(hellos.len(), 2);
+    assert!(hellos[0].get("reconnect_token").is_none());
+    assert_eq!(hellos[1]["reconnect_token"], "token-1");
+    let attaches = mock
+        .methods()
+        .iter()
+        .filter(|m| *m == "session.attach")
+        .count();
+    assert_eq!(attaches, 2);
+    // The message went out once, before the drop, and was never typed again.
+    assert_eq!(mock.writes().len(), 2);
+    assert_eq!(mock.audit().last().unwrap()["result"], "done");
+}
+
+#[test]
+fn send_catches_a_done_reported_while_disconnected() {
+    // Claude Code finishes during an outage that outlasts the first reconnect attempt.
+    let mock = demo(vec![], AfterEnter::DropThenDone { refuse: 1 });
+    let (output, events) = send_json(&mock, "20s");
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(connection_states(&events), ["lost", "retrying", "restored"]);
+    assert_eq!(events.last().unwrap()["status"], "done");
+    assert_eq!(mock.writes().len(), 2);
+}
+
+#[test]
+fn send_reconnects_when_the_server_stops_answering() {
+    // The connection stays open but goes silent, as when the event stream stopped in live
+    // use. The status poll's call times out, and a new connection finds Done.
+    let mock = demo(vec![], AfterEnter::FreezeThenDone);
+    mock.write_config_with(&[&mock.endpoint()], "call_timeout = \"1s\"\n");
+    let (output, events) = send_json(&mock, "20s");
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(connection_states(&events), ["lost", "restored"]);
+    assert_eq!(events.last().unwrap()["status"], "done");
+    assert_eq!(mock.writes().len(), 2);
+}
+
+#[test]
+fn send_exits_16_when_the_server_stays_unreachable() {
+    let mock = demo(vec![], AfterEnter::DropForever);
+    let (output, events) = send_json(&mock, "3s");
+    assert_eq!(code(&output), 16, "{output:?}");
+    let last = events.last().unwrap();
+    assert_eq!(last["status"], "lost_connection");
+    assert_eq!(last["last_status"], "working");
+    assert_eq!(last["exit_code"], 16);
+    assert_eq!(connection_states(&events), ["lost", "retrying"]);
+    assert_eq!(mock.writes().len(), 2);
+    assert_eq!(mock.audit().last().unwrap()["result"], "lost_connection");
 }
 
 #[test]

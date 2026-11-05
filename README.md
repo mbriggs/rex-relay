@@ -90,6 +90,7 @@ allowed_endpoints = ["https://rex-host.example.ts.net"]
 label_prefix = "grokbot-"
 max_message_bytes = 32768
 timeout = "30m"
+call_timeout = "10s"
 # audit_log = "~/.local/state/rex-relay/audit.jsonl"
 # registry = "~/.local/state/rex-relay/owned.json"
 ```
@@ -170,10 +171,27 @@ menu, Enter picks the highlighted option. A screen that matches neither layout i
 The message is written as one bracketed paste (`ESC[200~ … ESC[201~`), so newlines stay inside
 the message, followed after a short pause by a single carriage return (Enter).
 
-After Enter, `send` follows the pane's `program_status_changed` events (re-reading the status
-every few seconds in case one is missed) and ends at the first stop after the message: Done,
-Needs approval, Question, Needs input, Needs sign-in, or Error. The status the pane had before the
-message doesn't count.
+After Enter, `send` follows the pane's `program_status_changed` events and ends at the first stop
+after the message: Done, Needs approval, Question, Needs input, Needs sign-in, or Error. The
+status the pane had before the message doesn't count. Each report carries the time it was made,
+so a new Done counts even when the pane already showed Done before the message.
+
+### Lost connections
+
+`send` and `wait` re-read the pane's status every 3 seconds, whether or not events arrive. That
+read catches a missed event. Its round trip also shows whether the connection still works.
+
+If any call to the server fails or takes longer than `call_timeout` (default 10 seconds),
+`rexctl` drops the connection and opens a new one. It continues the same client on the server
+(the welcome's reconnect token), joins the session again, re-reads the pane's status, and keeps
+waiting. A Done reported while the connection was down still ends the wait. Failed attempts
+repeat after 1, 2, 4, and then every 8 seconds.
+
+`rexctl` never types anything after a reconnect. The message went out once, before the wait
+began.
+
+If the connection is still down when `--timeout` runs out, `rexctl` exits 16. In that case
+Claude Code's state is unknown. Check it with `rexctl status` once the server is reachable.
 
 ### Output
 
@@ -191,7 +209,12 @@ until they scroll up or the command ends.
 ```
 
 A timeout ends with `{"type":"result","status":"timeout","last_status":"working","exit_code":15}`,
-and failures with `{"type":"error","message":"…","exit_code":1}`. `list`, `status`, `read`, `new`
+a connection that couldn't be restored with
+`{"type":"result","status":"lost_connection","last_status":"working","exit_code":16}`, and
+failures with `{"type":"error","message":"…","exit_code":1}`. While waiting, `connection` objects
+report a lost connection, a failed first reconnect attempt, and a restored connection:
+`{"type":"connection","state":"lost","message":"…"}`, with `state` set to `lost`, `retrying`, or
+`restored`. `list`, `status`, `read`, `new`
 and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 
 ## Exit codes
@@ -208,6 +231,7 @@ and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 | 13 | Needs sign-in: waiting for a login or credential. |
 | 14 | Error: the program reported an error. |
 | 15 | Timeout: still working when `--timeout` ran out. |
+| 16 | Lost connection: the connection to the server broke during `send` or `wait` and couldn't be restored before `--timeout`. Claude Code's state is unknown. |
 
 ## Guard rails
 
@@ -286,6 +310,11 @@ dedicated config whose `allowed_endpoints` holds only that server.
 - [ ] Answer the prompt in Rex by hand, then `rexctl wait "$SID"` exits 0 once done.
 - [ ] A prompt that makes Claude Code ask a question exits 11.
 - [ ] `--timeout 5s` on a long task exits 15, and `--json` ends with a `timeout` result.
+- [ ] During a long `send`, drop the network between `rexctl` and Rex for 20 seconds (such as
+      `tailscale down` on the relay machine, then `tailscale up`). `rexctl` reports `connection
+      lost`, then `connection restored`, and still exits 0 when Claude Code finishes. Claude Code
+      received the message once.
+- [ ] With the network down for longer than `--timeout`, `send` exits 16.
 - [ ] Create a session by hand in Rex and label it `grokbot-fake`: `rexctl send grokbot-fake "hi"`
       exits 3 (not in the registry); with `--allow-foreign` it sends; `rexctl close grokbot-fake`
       exits 3 and the session stays open.
