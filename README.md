@@ -174,7 +174,9 @@ the message, followed after a short pause by a single carriage return (Enter).
 After Enter, `send` follows the pane's `program_status_changed` events and ends at the first stop
 after the message: Done, Needs approval, Question, Needs input, Needs sign-in, or Error. The
 status the pane had before the message doesn't count. Each report carries the time it was made,
-so a new Done counts even when the pane already showed Done before the message.
+so a new Done counts even when the pane already showed Done before the message. A pane whose
+records disappear after Working counts as Done only once it has stayed that way for 5 seconds,
+because Claude Code clears its record for a moment during some turns.
 
 ### Lost connections
 

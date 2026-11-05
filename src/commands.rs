@@ -911,7 +911,7 @@ impl Watch {
                 continue;
             };
             match self.step(rex, &mut clock, out, &mut shown) {
-                Ok(done) => finished = done,
+                Ok(done) => finished = done.or_else(|| self.tracker.settled_by(Instant::now())),
                 Err(error) if rex::is_connection_error(&error) => {
                     connection_note(out, "lost", &format!("{error:#}"));
                     link.lose();
@@ -956,6 +956,9 @@ impl Watch {
         let mut until = clock.deadline.min(clock.next_status);
         if self.pump.is_some() {
             until = until.min(clock.next_read);
+        }
+        if let Some(idle) = self.tracker.idle_deadline() {
+            until = until.min(idle);
         }
         let wait = until
             .saturating_duration_since(Instant::now())
@@ -1051,7 +1054,7 @@ impl Watch {
                 out.note(status.label());
             }
         }
-        self.tracker.observe(status)
+        self.tracker.observe(status, Instant::now())
     }
 
     fn status_event(&self, status: Status) -> Value {

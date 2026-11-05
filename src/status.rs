@@ -5,6 +5,7 @@
 //! highest record, in the order Blocked > Error > Working > Done > Idle.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use serde::{Serialize, Serializer};
 use serde_json::Value;
@@ -253,6 +254,10 @@ pub fn parse_block_event(payload: &Value) -> Option<(BlockId, BlockEvent)> {
     Some((block, event))
 }
 
+/// How long a pane must stay Idle after Working before that counts as Done. Claude Code clears
+/// its records briefly in the middle of a turn, so Idle alone doesn't mean finished.
+pub const IDLE_GRACE: Duration = Duration::from_secs(5);
+
 /// Decides when `send` or `wait` is finished, from the statuses seen after it started.
 #[derive(Debug, Clone)]
 pub struct Tracker {
@@ -260,6 +265,8 @@ pub struct Tracker {
     saw_working: bool,
     /// `send` ignores the status it started with: only a change after the message counts.
     need_change: bool,
+    /// When the pane went Idle after Working, if it still is.
+    idle_since: Option<Instant>,
 }
 
 impl Tracker {
@@ -269,6 +276,7 @@ impl Tracker {
             current: initial,
             saw_working: false,
             need_change: true,
+            idle_since: None,
         }
     }
 
@@ -278,6 +286,7 @@ impl Tracker {
             current: initial,
             saw_working: initial == Status::Working,
             need_change: false,
+            idle_since: None,
         }
     }
 
@@ -290,20 +299,40 @@ impl Tracker {
         (!self.need_change && self.current != Status::Working).then_some(self.current)
     }
 
-    /// Records a newly folded status from a live report. Returns the final status, if this
-    /// one ends the wait.
-    pub fn observe(&mut self, status: Status) -> Option<Status> {
+    /// Records a newly folded status from a live report, seen at `now`. Returns the final
+    /// status, if this one ends the wait.
+    pub fn observe(&mut self, status: Status, now: Instant) -> Option<Status> {
         self.current = status;
+        if status != Status::Idle {
+            self.idle_since = None;
+        }
         match status {
             Status::Working => {
                 self.saw_working = true;
                 None
             }
-            // A program that finishes may clear its records instead of reporting done.
-            Status::Idle if self.saw_working => Some(Status::Done),
-            Status::Idle => None,
+            // A program that finishes may clear its records instead of reporting done, but
+            // that only counts once the pane has stayed Idle for IDLE_GRACE.
+            Status::Idle => {
+                if self.saw_working && self.idle_since.is_none() {
+                    self.idle_since = Some(now);
+                }
+                None
+            }
             _ => Some(status),
         }
+    }
+
+    /// When an Idle that followed Working will count as Done, if one is pending.
+    pub fn idle_deadline(&self) -> Option<Instant> {
+        self.idle_since.map(|since| since + IDLE_GRACE)
+    }
+
+    /// Done, if the pane has stayed Idle after Working for IDLE_GRACE by `now`.
+    pub fn settled_by(&self, now: Instant) -> Option<Status> {
+        self.idle_deadline()
+            .is_some_and(|deadline| now >= deadline)
+            .then_some(Status::Done)
     }
 }
 
@@ -441,19 +470,15 @@ mod tests {
 
     #[test]
     fn send_ignores_the_status_it_started_with() {
+        let now = Instant::now();
         let mut t = Tracker::after_send(Status::Done);
         assert_eq!(t.settled_now(), None);
-        assert_eq!(t.observe(Status::Working), None);
-        assert_eq!(t.observe(Status::Done), Some(Status::Done));
-
-        let mut t = Tracker::after_send(Status::Idle);
-        assert_eq!(t.observe(Status::Idle), None);
-        assert_eq!(t.observe(Status::Working), None);
-        assert_eq!(t.observe(Status::Idle), Some(Status::Done));
+        assert_eq!(t.observe(Status::Working, now), None);
+        assert_eq!(t.observe(Status::Done, now), Some(Status::Done));
 
         let mut t = Tracker::after_send(Status::Working);
         assert_eq!(
-            t.observe(Status::NeedsApproval),
+            t.observe(Status::NeedsApproval, now),
             Some(Status::NeedsApproval)
         );
     }
@@ -468,8 +493,41 @@ mod tests {
             Tracker::waiting(Status::Idle).settled_now(),
             Some(Status::Idle)
         );
+        let now = Instant::now();
         let mut t = Tracker::waiting(Status::Working);
         assert_eq!(t.settled_now(), None);
-        assert_eq!(t.observe(Status::Idle), Some(Status::Done));
+        assert_eq!(t.observe(Status::Idle, now), None);
+        assert_eq!(t.settled_by(now + IDLE_GRACE), Some(Status::Done));
+    }
+
+    #[test]
+    fn idle_after_working_is_done_only_once_it_lasts() {
+        let start = Instant::now();
+        let mut t = Tracker::after_send(Status::Idle);
+        assert_eq!(t.observe(Status::Idle, start), None, "before any work");
+        assert_eq!(t.idle_deadline(), None);
+        assert_eq!(t.observe(Status::Working, start), None);
+        // Claude Code clears its records mid-turn, then reports Working again.
+        let blip = start + Duration::from_secs(1);
+        assert_eq!(t.observe(Status::Idle, blip), None);
+        assert_eq!(t.idle_deadline(), Some(blip + IDLE_GRACE));
+        assert_eq!(t.settled_by(blip + Duration::from_secs(2)), None);
+        assert_eq!(
+            t.observe(Status::Working, blip + Duration::from_secs(2)),
+            None
+        );
+        assert_eq!(
+            t.settled_by(blip + IDLE_GRACE),
+            None,
+            "the blip was cancelled"
+        );
+        // An Idle that lasts is Done; a repeated Idle report doesn't restart the clock.
+        let quiet = start + Duration::from_secs(10);
+        assert_eq!(t.observe(Status::Idle, quiet), None);
+        assert_eq!(
+            t.observe(Status::Idle, quiet + Duration::from_secs(3)),
+            None
+        );
+        assert_eq!(t.settled_by(quiet + IDLE_GRACE), Some(Status::Done));
     }
 }

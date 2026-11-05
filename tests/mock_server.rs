@@ -41,6 +41,8 @@ enum AfterEnter {
     FreezeThenDone,
     /// Drops the connection and refuses every later one.
     DropForever,
+    /// Clears its records for a moment, as Claude Code does mid-turn, then keeps working.
+    BlipThenKeepWorking,
 }
 
 #[derive(Clone, Debug)]
@@ -362,6 +364,22 @@ fn render(state: &State, vt: bool) -> String {
     text
 }
 
+fn clear_records(state: &Mutex<State>, session: &str, block: &str) {
+    let mut state = state.lock().unwrap();
+    let blocks = &mut state
+        .sessions
+        .iter_mut()
+        .find(|s| s.0 == session)
+        .unwrap()
+        .2;
+    blocks
+        .iter_mut()
+        .find(|b| b.id == block)
+        .unwrap()
+        .records
+        .clear();
+}
+
 /// Stores `record` as the pane's only record, as a status read would return it.
 fn set_records(state: &Mutex<State>, session: &str, block: &str, record: Value) {
     let mut state = state.lock().unwrap();
@@ -460,6 +478,16 @@ fn serve(stream: std::net::TcpStream, state: Arc<Mutex<State>>) {
                     AfterEnter::DropForever => {
                         state.lock().unwrap().refuse = usize::MAX;
                         return;
+                    }
+                    AfterEnter::BlipThenKeepWorking => {
+                        clear_records(&state, &session, &block);
+                        conn.block_event(
+                            &session,
+                            &block,
+                            "program_status_removed",
+                            json!({"ids": [""], "reason": "report"}),
+                        );
+                        conn.report(&state, &session, &block, fresh("working", None, None));
                     }
                 }
             }
@@ -681,6 +709,16 @@ fn send_catches_done_by_polling_when_events_stop() {
     assert_eq!(events.last().unwrap()["status"], "done");
     assert!(connection_states(&events).is_empty(), "{events:?}");
     assert_eq!(mock.writes().len(), 2);
+}
+
+#[test]
+fn a_brief_idle_mid_turn_is_not_done() {
+    // In live use, Claude Code cleared its status record for a moment during its first turn,
+    // and send took the Idle for Done while Claude Code was still thinking.
+    let mock = demo(vec![], AfterEnter::BlipThenKeepWorking);
+    let (output, events) = send_json(&mock, "2s");
+    assert_eq!(code(&output), 15, "still working: {output:?}");
+    assert_eq!(events.last().unwrap()["last_status"], "working");
 }
 
 #[test]
