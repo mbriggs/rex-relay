@@ -365,6 +365,12 @@ Pushing a tag that matches `Cargo.toml`'s version, such as `v0.1.0`, runs
 archive per target (the binary, the agent skill, and the docs), a `.sha256` file for each, a
 combined `SHA256SUMS`, and `install.sh`. The release fails if the tag and the version differ.
 
+The release workflow runs CI on the tagged commit first, and builds nothing unless CI passes.
+Release runs share one concurrency group, so a run that has started is never cancelled. If the
+repository variable `RELEASER` is set, only a tag pushed by that GitHub account publishes, and the
+publish job is skipped for anyone else. With `RELEASER` unset, any tag push can publish. Publishing
+runs in the `release` environment, so any protection rules on that environment also apply.
+
 ## Development
 
 The minimum supported Rust is 1.89, set by `rust-version` in `Cargo.toml` and checked in CI.
