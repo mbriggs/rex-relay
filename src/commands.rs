@@ -765,14 +765,14 @@ impl<'a> SendAttempt<'a> {
                 "block_id": bid,
                 "bytes": args.message.len(),
             }));
-        } else {
+        } else if !args.wait.quiet {
             out.note(&format!(
                 "sent {} bytes to {} {bid}",
                 args.message.len(),
                 located.session.label
             ));
         }
-        let pump = (!args.wait.quiet).then(|| Pump::new(&screen, DEFAULT_HOLDBACK));
+        let pump = Output::new(&args.wait, || Ok(screen))?;
         let watch = Watch {
             sid,
             bid,
@@ -821,11 +821,7 @@ fn wait(ctx: &Ctx, out: &Out, args: &WaitArgs) -> Result<i32> {
     let (sid, bid) = (located.session.id, located.pane.block_id);
     let (seq, records) = rex.program_status(&sid, &bid)?;
     let tracker = Tracker::waiting(records.status());
-    let pump = if args.wait.quiet {
-        None
-    } else {
-        Some(Pump::new(&rex.read_text(&sid, &bid)?, DEFAULT_HOLDBACK))
-    };
+    let pump = Output::new(&args.wait, || rex.read_text(&sid, &bid))?;
     let watch = Watch {
         sid,
         bid,
@@ -1015,7 +1011,30 @@ struct Watch {
     /// Events up to this seq are already reflected in `records`.
     seq: u64,
     tracker: Tracker,
-    pump: Option<Pump>,
+    pump: Output,
+}
+
+/// What a watch prints of the pane's text.
+enum Output {
+    /// New lines as they settle, starting from a baseline that counts as already seen.
+    Stream(Pump),
+    /// Only the last lines at the end (`--quiet`). 0 means every line.
+    Tail(usize),
+}
+
+impl Output {
+    /// `baseline` reads the pane's text, and is only called when streaming.
+    fn new(options: &WaitOptions, baseline: impl FnOnce() -> Result<String>) -> Result<Self> {
+        Ok(if options.quiet {
+            Output::Tail(options.lines)
+        } else {
+            Output::Stream(Pump::new(&baseline()?, DEFAULT_HOLDBACK))
+        })
+    }
+
+    fn streams(&self) -> bool {
+        matches!(self, Output::Stream(_))
+    }
 }
 
 impl Watch {
@@ -1091,9 +1110,9 @@ impl Watch {
         shown: &mut Status,
     ) -> Result<Option<Status>> {
         let now = Instant::now();
-        if self.pump.is_some() && now >= clock.next_read {
+        if self.pump.streams() && now >= clock.next_read {
             let text = rex.read_text(&self.sid, &self.bid)?;
-            if let Some(pump) = &mut self.pump {
+            if let Output::Stream(pump) = &mut self.pump {
                 print_lines(out, pump.update(&text));
             }
             clock.next_read = now + clock.poll;
@@ -1109,7 +1128,7 @@ impl Watch {
             return Ok(None);
         }
         let mut until = clock.deadline.min(clock.next_status);
-        if self.pump.is_some() {
+        if self.pump.streams() {
             until = until.min(clock.next_read);
         }
         if let Some(idle) = self.tracker.idle_deadline() {
@@ -1204,7 +1223,7 @@ impl Watch {
             *shown = status;
             if out.json {
                 out.event(self.status_event(status));
-            } else if !status.is_blocked() && status != Status::Error {
+            } else if self.pump.streams() && !status.is_blocked() && status != Status::Error {
                 // Blocked and error states are reported once, at the end.
                 out.note(status.label());
             }
@@ -1221,15 +1240,30 @@ impl Watch {
         })
     }
 
-    /// Prints whatever output is left, if the connection is up. The outcome matters more than
-    /// the last lines, so a failed read is only noted.
+    /// Prints whatever output is left, or the tail, if the connection is up. The outcome
+    /// matters more than the last lines, so a failed read is only noted.
     fn flush(&mut self, link: &mut Link, out: &Out) {
-        let (Some(rex), Some(pump)) = (link.rex.as_mut(), self.pump.as_mut()) else {
+        let Some(rex) = link.rex.as_mut() else {
             return;
         };
-        match rex.read_text(&self.sid, &self.bid) {
-            Ok(text) => print_lines(out, pump.finish(&text)),
-            Err(error) => out.note(&format!("couldn't read the pane's last output: {error:#}")),
+        let text = match rex.read_text(&self.sid, &self.bid) {
+            Ok(text) => text,
+            Err(error) => {
+                out.note(&format!("couldn't read the pane's last output: {error:#}"));
+                return;
+            }
+        };
+        match &mut self.pump {
+            Output::Stream(pump) => print_lines(out, pump.finish(&text)),
+            Output::Tail(count) if out.json => out.event(json!({
+                "type": "tail",
+                "lines": last_lines(&text, *count),
+            })),
+            Output::Tail(count) => {
+                for line in last_lines(&text, *count) {
+                    out.line(line);
+                }
+            }
         }
     }
 }

@@ -131,9 +131,14 @@ pub struct WaitOptions {
     /// config's, or 30m.
     #[arg(long, value_parser = humantime::parse_duration, value_name = "DURATION")]
     pub timeout: Option<Duration>,
-    /// Don't stream the pane's output.
+    /// Don't stream the pane's output or status changes. At the end, print only the last lines
+    /// of the pane (see --lines) and the final status.
     #[arg(long)]
     pub quiet: bool,
+    /// With --quiet, how many lines from the end of the pane to print at the end. 0 prints
+    /// everything.
+    #[arg(long, default_value_t = 20, value_name = "N")]
+    pub lines: usize,
     /// How often to read the pane's text, such as 500ms.
     #[arg(long, value_parser = humantime::parse_duration, default_value = "1s", value_name = "DURATION")]
     pub poll: Duration,

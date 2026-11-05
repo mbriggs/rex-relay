@@ -839,6 +839,29 @@ fn an_unreachable_server_exits_16_after_connect_timeout() {
 }
 
 #[test]
+fn quiet_prints_only_the_tail_and_the_final_status() {
+    let mock = demo(vec![], AfterEnter::Done);
+    let output = mock.rexctl(&["send", "demo", "fix the bug", "--quiet", "--lines", "6"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    // The final screen's last 6 lines, and nothing streamed before them.
+    let mut tail = vec!["  Updated src/lib.rs", ""];
+    tail.extend(&BOX);
+    assert_eq!(stdout(&output), format!("{}\n", tail.join("\n")));
+    assert_eq!(stderr(&output), "rexctl: Done\n");
+
+    let output = mock.rexctl(&["wait", "demo", "--quiet", "--lines", "1"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(stdout(&output), format!("{}\n", BOX[3]));
+
+    let output = mock.rexctl(&["--json", "send", "demo", "go", "--quiet", "--lines", "2"]);
+    let events = json_lines(&output);
+    assert!(events.iter().all(|e| e["type"] != "output"), "{events:?}");
+    let tail = events.iter().find(|e| e["type"] == "tail").unwrap();
+    assert_eq!(tail["lines"], json!([BOX[2], BOX[3]]));
+    assert_eq!(events.last().unwrap()["type"], "result");
+}
+
+#[test]
 fn send_json_reports_needs_approval() {
     let mock = demo(vec![], AfterEnter::Blocked("permission"));
     let output = mock.rexctl(&["--json", "send", "demo", "run the tests", "--poll", "100ms"]);

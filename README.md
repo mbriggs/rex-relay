@@ -151,8 +151,14 @@ atomically (write to a temporary file, fsync, rename); the file is `0600`. A reg
 be parsed is an error, never treated as empty. `close` on a registered id that the server no
 longer has removes it from the registry without sending anything.
 
-`send` and `wait` options: `--timeout DURATION` (default `30m`, or the config's), `--quiet`
-(don't stream output), `--poll DURATION` (how often to read the pane, default `1s`).
+`send` and `wait` options:
+
+- `--timeout DURATION`: how long to wait. Defaults to `30m`, or the config's `timeout`.
+- `--quiet`: don't stream the pane's output or status changes. At the end, print only the last
+  lines of the pane on stdout and the final status on stderr. Exit codes don't change.
+- `--lines N`: with `--quiet`, how many lines to print at the end. Defaults to 20; 0 prints all.
+- `--poll DURATION`: how often to read the pane while streaming. Defaults to `1s`.
+
 `send` also takes `--answer`, `--allow-foreign`, `--max-bytes N`, and `--block ID`.
 
 ### Which pane
@@ -239,7 +245,8 @@ a connection that couldn't be restored with
 failures with `{"type":"error","message":"…","exit_code":1}`. While waiting, `connection` objects
 report a lost connection, a failed first reconnect attempt, and a restored connection:
 `{"type":"connection","state":"lost","message":"…"}`, with `state` set to `lost`, `retrying`, or
-`restored`. `list`, `status`, `read`, `new`
+`restored`. With `--quiet`, a `{"type":"tail","lines":[…]}` object comes just before the result
+instead of `output` objects. `list`, `status`, `read`, `new`
 and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 
 ## Exit codes
