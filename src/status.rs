@@ -91,6 +91,8 @@ pub enum Status {
     #[default]
     Idle,
     Working,
+    /// The turn is over, but background shells it started are still running.
+    Background,
     Done,
     NeedsApproval,
     Question,
@@ -118,11 +120,26 @@ impl Status {
         }
     }
 
+    /// A Done or Idle pane with background shells still running is Background: the turn has
+    /// ended, but the work hasn't.
+    pub fn with_shells(self, shells: usize) -> Self {
+        match self {
+            Status::Done | Status::Idle if shells > 0 => Status::Background,
+            status => status,
+        }
+    }
+
+    /// Still going: `send` and `wait` keep waiting.
+    pub fn is_busy(self) -> bool {
+        matches!(self, Status::Working | Status::Background)
+    }
+
     /// The words Rex shows for the status.
     pub fn label(self) -> &'static str {
         match self {
             Status::Idle => "Idle",
             Status::Working => "Working",
+            Status::Background => "Background",
             Status::Done => "Done",
             Status::NeedsApproval => "Needs approval",
             Status::Question => "Question",
@@ -138,6 +155,7 @@ impl Status {
         match self {
             Status::Idle => "idle",
             Status::Working => "working",
+            Status::Background => "background",
             Status::Done => "done",
             Status::NeedsApproval => "needs_approval",
             Status::Question => "question",
@@ -162,7 +180,7 @@ impl Status {
     /// The exit code `send` and `wait` end with when the program stops in this status.
     pub fn exit_code(self) -> i32 {
         match self {
-            Status::Idle | Status::Done | Status::Working => exit::OK,
+            Status::Idle | Status::Done | Status::Working | Status::Background => exit::OK,
             // A person answers the dialog in Rex, as with a permission request.
             Status::NeedsApproval | Status::Dialog => exit::NEEDS_APPROVAL,
             Status::Question => exit::QUESTION,
@@ -294,11 +312,11 @@ impl Tracker {
         }
     }
 
-    /// For `wait`: any status but Working is already an answer.
+    /// For `wait`: any status but Working or Background is already an answer.
     pub fn waiting(initial: Status) -> Self {
         Tracker {
             current: initial,
-            saw_working: initial == Status::Working,
+            saw_working: initial.is_busy(),
             need_change: false,
             idle_since: None,
         }
@@ -310,7 +328,7 @@ impl Tracker {
 
     /// The final status, if `wait` should end before any change.
     pub fn settled_now(&self) -> Option<Status> {
-        (!self.need_change && self.current != Status::Working).then_some(self.current)
+        (!self.need_change && !self.current.is_busy()).then_some(self.current)
     }
 
     /// Records a newly folded status from a live report, seen at `now`. Returns the final
@@ -321,7 +339,7 @@ impl Tracker {
             self.idle_since = None;
         }
         match status {
-            Status::Working => {
+            Status::Working | Status::Background => {
                 self.saw_working = true;
                 None
             }
@@ -471,6 +489,7 @@ mod tests {
         for status in [
             Status::Idle,
             Status::Working,
+            Status::Background,
             Status::Done,
             Status::NeedsApproval,
             Status::Question,
@@ -510,6 +529,25 @@ mod tests {
         let now = Instant::now();
         let mut t = Tracker::waiting(Status::Working);
         assert_eq!(t.settled_now(), None);
+        assert_eq!(t.observe(Status::Idle, now), None);
+        assert_eq!(t.settled_by(now + IDLE_GRACE), Some(Status::Done));
+    }
+
+    #[test]
+    fn background_shells_keep_the_wait_going() {
+        assert_eq!(Status::Done.with_shells(0), Status::Done);
+        assert_eq!(Status::Done.with_shells(2), Status::Background);
+        assert_eq!(Status::Idle.with_shells(1), Status::Background);
+        assert_eq!(Status::Question.with_shells(1), Status::Question);
+
+        let now = Instant::now();
+        let mut t = Tracker::waiting(Status::Background);
+        assert_eq!(t.settled_now(), None);
+        assert_eq!(t.observe(Status::Background, now), None);
+        assert_eq!(t.observe(Status::Done, now), Some(Status::Done));
+        // Shells that outlive the records: Idle after Background still needs the grace.
+        let mut t = Tracker::after_send(Status::Done);
+        assert_eq!(t.observe(Status::Background, now), None);
         assert_eq!(t.observe(Status::Idle, now), None);
         assert_eq!(t.settled_by(now + IDLE_GRACE), Some(Status::Done));
     }

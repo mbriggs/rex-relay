@@ -26,6 +26,9 @@ change the command-line interface.
 - `new --cwd` expands a leading `~` to the Rex host's home directory, and fails if the
   directory doesn't exist there. Before, Rex started the pane in the home directory without an
   error. `--cwd` must be an absolute path, `~`, or a path under `~/` (#13).
+- `status`, `tree`, `send` and `wait` no longer report Done while Claude Code's footer shows
+  background shells still running. The pane is Background (`"shells": N` in JSON), and `send`
+  and `wait` keep waiting until the shells finish (#34).
 
 ## [0.1.0] - 2026-11-04
 

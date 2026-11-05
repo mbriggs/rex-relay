@@ -225,6 +225,15 @@ so a new Done counts even when the pane already showed Done before the message. 
 records disappear after Working counts as Done only once it has stayed that way for 5 seconds,
 because Claude Code clears its record for a moment during some turns.
 
+Claude Code can end its turn while shells it started in the background keep running. Its status
+then says Done, but the footer under the prompt says `1 shell still running` or `N shells still
+running`. `rex-relay` reads that footer and reports the pane as Background instead of Done or
+Idle: `status` prints `Background (2 shells)`, and `--json` gives `"status":"background"` with
+`"shells":2`. `send` and `wait` don't stop at Background. They keep waiting until the shells
+finish and the pane is Done, or until `--timeout`, which exits 15 with `last_status` set to
+`background`. The footer has no status record or event, so `send` and `wait` re-read it with each
+3-second status poll, and once more before they report Done.
+
 ### Lost connections
 
 Every command retries its first connection if it can't be made, such as during a network blip.
@@ -305,7 +314,8 @@ a connection that couldn't be restored with
 failures with `{"type":"error","message":"…","exit_code":1}`. While waiting, `connection` objects
 report a lost connection, a failed first reconnect attempt, and a restored connection:
 `{"type":"connection","state":"lost","message":"…"}`, with `state` set to `lost`, `retrying`, or
-`restored`. With `--quiet`, a `{"type":"tail","lines":[…]}` object comes just before the result
+`restored`. `status` objects also carry `shells`, the number of background shells the footer
+shows. With `--quiet`, a `{"type":"tail","lines":[…]}` object comes just before the result
 instead of `output` objects. `list`, `status`, `read`, `new`
 and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 
@@ -313,7 +323,7 @@ and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Done (or the command succeeded). `wait` also returns 0 for an idle pane. |
+| 0 | Done (or the command succeeded). `wait` also returns 0 for an idle pane. Never while background shells run. |
 | 1 | Error: connection, protocol, session or pane not found, pane closed. |
 | 2 | Usage error, including a label that matches more than one session. |
 | 3 | Refused by a guard rail. Nothing was typed. |
