@@ -9,11 +9,22 @@ on:
 permissions:
   contents: read
 
+# One release at a time, and never cancel a run that has started. A half-finished run can leave a
+# release without all its assets.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A tag whose CI fails builds and publishes nothing.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: ci
     strategy:
       fail-fast: false
       matrix:
@@ -56,6 +67,10 @@ jobs:
 
   release:
     needs: build
+    # Only the account named by the RELEASER repository variable may publish. With RELEASER unset,
+    # anyone who can push a tag may publish.
+    if: vars.RELEASER == '' || github.triggering_actor == vars.RELEASER
+    environment: release
     runs-on: ubuntu-latest
     permissions:
       contents: write
