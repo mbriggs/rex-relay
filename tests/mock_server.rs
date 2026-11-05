@@ -200,7 +200,7 @@ impl Mock {
             .load()
             .unwrap()
             .into_iter()
-            .map(|o| o.session_id)
+            .map(|o| o.session_id.to_string())
             .collect()
     }
 
@@ -609,7 +609,7 @@ fn ownership_follows_the_session_id_not_the_label() {
     let other = demo(vec![], AfterEnter::Done);
     other
         .registry()
-        .remove(&other.canonical_endpoint(), SID)
+        .remove(&other.canonical_endpoint(), &SID.into())
         .unwrap();
     other
         .registry()
@@ -861,7 +861,7 @@ fn new_creates_prefixed_session_and_audits() {
 
     let owned = mock
         .registry()
-        .find(&mock.canonical_endpoint(), "session:new")
+        .find(&mock.canonical_endpoint(), &"session:new".into())
         .unwrap()
         .expect("recorded as owned");
     assert_eq!(owned.label, "grokbot-fix-ci");
@@ -908,7 +908,7 @@ fn new_creates_prefixed_session_and_audits() {
     assert_eq!(code(&output), 0, "{output:?}");
     assert!(
         mock.registry()
-            .find(&mock.canonical_endpoint(), "session:new")
+            .find(&mock.canonical_endpoint(), &"session:new".into())
             .unwrap()
             .is_none()
     );

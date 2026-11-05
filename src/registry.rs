@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::ids::SessionId;
+
 const VERSION: u32 = 1;
 
 /// One session the relay created.
@@ -22,7 +24,7 @@ const VERSION: u32 = 1;
 pub struct Owned {
     /// The canonical endpoint the session lives on.
     pub endpoint: String,
-    pub session_id: String,
+    pub session_id: SessionId,
     /// The label it was created with. Its current label may differ.
     pub label: String,
     pub created_at: String,
@@ -78,11 +80,11 @@ impl Registry {
         Ok(sessions)
     }
 
-    pub fn find(&self, endpoint: &str, session_id: &str) -> Result<Option<Owned>> {
+    pub fn find(&self, endpoint: &str, session_id: &SessionId) -> Result<Option<Owned>> {
         Ok(self
             .on(endpoint)?
             .into_iter()
-            .find(|s| s.session_id == session_id))
+            .find(|s| &s.session_id == session_id))
     }
 
     /// Checks that the registry can be read and changed, before doing anything that would
@@ -102,10 +104,10 @@ impl Registry {
     }
 
     /// Removes a session. Returns whether it was there.
-    pub fn remove(&self, endpoint: &str, session_id: &str) -> Result<bool> {
+    pub fn remove(&self, endpoint: &str, session_id: &SessionId) -> Result<bool> {
         self.update(|sessions| {
             let before = sessions.len();
-            sessions.retain(|s| !(s.endpoint == endpoint && s.session_id == session_id));
+            sessions.retain(|s| !(s.endpoint == endpoint && &s.session_id == session_id));
             sessions.len() != before
         })
     }
@@ -233,20 +235,20 @@ mod tests {
         assert_eq!(registry.on(A).unwrap().len(), 2);
         assert_eq!(
             registry
-                .find(A, "session:1")
+                .find(A, &"session:1".into())
                 .unwrap()
                 .unwrap()
                 .purpose
                 .as_deref(),
             Some("fix CI")
         );
-        assert!(registry.find(A, "session:9").unwrap().is_none());
+        assert!(registry.find(A, &"session:9".into()).unwrap().is_none());
 
-        assert!(registry.remove(A, "session:1").unwrap());
-        assert!(!registry.remove(A, "session:1").unwrap());
-        assert!(registry.find(A, "session:1").unwrap().is_none());
+        assert!(registry.remove(A, &"session:1".into()).unwrap());
+        assert!(!registry.remove(A, &"session:1".into()).unwrap());
+        assert!(registry.find(A, &"session:1".into()).unwrap().is_none());
         assert!(
-            registry.find(B, "session:1").unwrap().is_some(),
+            registry.find(B, &"session:1".into()).unwrap().is_some(),
             "other endpoint kept"
         );
 
@@ -271,7 +273,7 @@ mod tests {
         let registry = Registry::new(dir.path().join("owned.json"));
         fs::write(registry.path(), "{not json").unwrap();
         assert!(registry.load().is_err());
-        assert!(registry.find(A, "session:1").is_err());
+        assert!(registry.find(A, &"session:1".into()).is_err());
         assert!(registry.add(owned(A, "session:1")).is_err());
         assert_eq!(fs::read_to_string(registry.path()).unwrap(), "{not json");
 

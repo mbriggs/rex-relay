@@ -4,7 +4,6 @@ use std::io::Write as _;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use rexrs::api::session::Session;
 use serde_json::{Value, json};
 
 use crate::audit::{self, AuditLog, Entry};
@@ -13,10 +12,11 @@ use crate::config::{self, Config};
 use crate::endpoint::Endpoint;
 use crate::exit;
 use crate::guard::{self, Refusal};
+use crate::ids::{BlockId, SessionId};
 use crate::output::{DEFAULT_HOLDBACK, Pump};
 use crate::pane::{self, Evidence, Pane};
 use crate::registry::{Owned, Registry};
-use crate::rex::Rex;
+use crate::rex::{Rex, Session};
 use crate::status::{self, Records, Status, Tracker};
 
 /// How often `send` and `wait` re-read the status in case an event was missed.
@@ -85,7 +85,7 @@ impl Ctx {
         self.endpoint.to_string()
     }
 
-    fn owned(&self, session_id: &str) -> Result<Option<Owned>> {
+    fn owned(&self, session_id: &SessionId) -> Result<Option<Owned>> {
         self.registry.find(&self.endpoint_key(), session_id)
     }
 }
@@ -153,13 +153,13 @@ struct Located {
 /// otherwise the connection only observes.
 fn locate(rex: &mut Rex, session: Session, target: &Target, attach: bool) -> Result<Located> {
     let view = if attach {
-        rex.attach(&session.session_id)?.1
+        rex.attach(&session.id)?.1
     } else {
         rex.observe_all()?;
-        rex.view(&session.session_id)?
+        rex.view(&session.id)?
     };
     let panes = pane::panes(&view);
-    let sid = session.session_id.clone();
+    let sid = session.id.clone();
     // A pane that can't answer one of these simply offers no evidence.
     let mut gather = |pane: &Pane| Evidence {
         records: rex
@@ -199,11 +199,11 @@ fn list(ctx: &Ctx, out: &Out) -> Result<i32> {
     rex.close();
     let owned = ctx.registry.on(&ctx.endpoint_key())?;
     for s in &sessions {
-        let mine = owned.iter().find(|o| o.session_id == s.session_id);
+        let mine = owned.iter().find(|o| o.session_id == s.id);
         if out.json {
             out.event(json!({
                 "type": "session",
-                "session_id": s.session_id,
+                "session_id": s.id,
                 "label": s.label,
                 "owned": mine.is_some(),
                 "purpose": mine.and_then(|o| o.purpose.as_deref()),
@@ -212,7 +212,7 @@ fn list(ctx: &Ctx, out: &Out) -> Result<i32> {
             }));
         } else {
             let mark = if mine.is_some() { "*" } else { " " };
-            let mut line = format!("{mark} {}\t{}", s.session_id, s.label);
+            let mut line = format!("{mark} {}\t{}", s.id, s.label);
             if let Some(purpose) = mine.and_then(|o| o.purpose.as_deref()) {
                 line.push_str(&format!("\t{purpose}"));
             }
@@ -235,7 +235,7 @@ fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
     if out.json {
         out.event(json!({
             "type": "status",
-            "session_id": located.session.session_id,
+            "session_id": located.session.id,
             "session_label": located.session.label,
             "block_id": located.pane.block_id,
             "status": status,
@@ -248,7 +248,7 @@ fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
         let mut line = format!(
             "{} ({}) {}: {}",
             located.session.label,
-            located.session.session_id,
+            located.session.id,
             located.pane.block_id,
             status.label()
         );
@@ -264,13 +264,13 @@ fn read(ctx: &Ctx, out: &Out, target: &Target, count: usize) -> Result<i32> {
     let mut rex = ctx.connect()?;
     let session = rex.resolve(&target.session)?;
     let located = locate(&mut rex, session, target, false)?;
-    let text = rex.read_text(&located.session.session_id, &located.pane.block_id)?;
+    let text = rex.read_text(&located.session.id, &located.pane.block_id)?;
     rex.close();
     let lines = last_lines(&text, count);
     if out.json {
         out.event(json!({
             "type": "text",
-            "session_id": located.session.session_id,
+            "session_id": located.session.id,
             "block_id": located.pane.block_id,
             "lines": lines,
         }));
@@ -334,7 +334,7 @@ fn create(
     cmd: &Program,
     purpose: Option<&str>,
     entry: &mut Entry,
-) -> Result<(String, String)> {
+) -> Result<(SessionId, BlockId)> {
     guard::check_label(label)?;
     if let Some(purpose) = purpose {
         guard::check_purpose(purpose)?;
@@ -350,13 +350,13 @@ fn create(
     }
     let created = rex.create(label, cwd, &cmd.0)?;
     rex.close();
-    entry.session = Some(created.session_id.clone());
+    entry.session = Some(created.session.to_string());
     // Record ownership before anything else can fail: an unrecorded session could never be
     // sent to without --allow-foreign, nor closed.
     ctx.registry
         .add(Owned {
             endpoint: ctx.endpoint_key(),
-            session_id: created.session_id.clone(),
+            session_id: created.session.clone(),
             label: label.to_owned(),
             created_at: audit::now(),
             purpose: purpose.map(str::to_owned),
@@ -364,17 +364,12 @@ fn create(
         .with_context(|| {
             format!(
                 "session {} was created but couldn't be recorded as owned",
-                created.session_id
+                created.session
             )
         })?;
-    let block_id = created
-        .initial_windows
-        .first()
-        .and_then(|w| w.block_ids.first())
-        .cloned()
-        .context("the server created no block")?;
-    entry.block = Some(block_id.clone());
-    Ok((created.session_id, block_id))
+    let block_id = created.block.context("the server created no block")?;
+    entry.block = Some(block_id.to_string());
+    Ok((created.session, block_id))
 }
 
 fn close(ctx: &Ctx, out: &Out, wanted: &str) -> Result<i32> {
@@ -416,28 +411,29 @@ fn close_owned(ctx: &Ctx, wanted: &str, entry: &mut Entry) -> Result<Closed> {
         Ok(session) => session,
         Err(error) => {
             // A registered id the server no longer knows: forget it, close nothing.
-            let gone = !rex.sessions()?.iter().any(|s| s.session_id == wanted);
-            if gone && ctx.owned(wanted)?.is_some() {
+            let wanted = SessionId::from(wanted);
+            let gone = !rex.sessions()?.iter().any(|s| s.id == wanted);
+            if gone && ctx.owned(&wanted)?.is_some() {
                 rex.close();
-                ctx.registry.remove(&ctx.endpoint_key(), wanted)?;
+                ctx.registry.remove(&ctx.endpoint_key(), &wanted)?;
                 return Ok(Closed::AlreadyGone);
             }
             return Err(error);
         }
     };
-    entry.session = Some(session.session_id.clone());
+    entry.session = Some(session.id.to_string());
     entry.session_label = Some(session.label.clone());
-    let owned = ctx.owned(&session.session_id)?.is_some();
-    guard::check_close_owned(owned, &session.session_id, &session.label)?;
+    let owned = ctx.owned(&session.id)?.is_some();
+    guard::check_close_owned(owned, session.id.as_str(), &session.label)?;
     rex.observe_all()?;
-    rex.destroy(&session.session_id)?;
+    rex.destroy(&session.id)?;
     rex.close();
     ctx.registry
-        .remove(&ctx.endpoint_key(), &session.session_id)
+        .remove(&ctx.endpoint_key(), &session.id)
         .with_context(|| {
             format!(
                 "closed {} but couldn't remove it from the registry",
-                session.session_id
+                session.id
             )
         })?;
     Ok(Closed::Closed)
@@ -451,110 +447,133 @@ fn audit_error(error: &anyhow::Error) -> String {
 }
 
 fn send(ctx: &Ctx, out: &Out, args: &SendArgs) -> Result<i32> {
-    let mut entry = Entry::new("send", ctx.endpoint_key()).message(&args.message);
-    entry.session = Some(args.target.session.clone());
-    let mut delivered = false;
-    let result = deliver(ctx, out, args, &mut entry, &mut delivered);
-    // A delivered message already has its "sent" entry; this one records how it ended.
-    if delivered {
-        entry.timestamp = audit::now();
-    }
-    entry.result = match &result {
+    let mut attempt = SendAttempt::new(args);
+    let result = attempt.run(ctx, out);
+    let outcome = match &result {
         Ok(outcome) => outcome.as_str().to_owned(),
         Err(error) => audit_error(error),
     };
-    ctx.audit.append(&entry)?;
-    let outcome = result?;
-    Ok(finish(out, outcome))
+    ctx.audit.append(&attempt.entry(ctx, outcome))?;
+    Ok(finish(out, result?))
 }
 
-fn deliver(
-    ctx: &Ctx,
-    out: &Out,
-    args: &SendArgs,
-    entry: &mut Entry,
-    delivered: &mut bool,
-) -> Result<Outcome> {
-    // The flag can only tighten the configured limit.
-    let limit = ctx.config.max_message_bytes();
-    let max = args.max_bytes.map_or(limit, |m| m.min(limit));
-    guard::check_message(&args.message, max)?;
-    let mut rex = ctx.connect()?;
-    // The label is resolved now, as Claude Code may have renamed the session; ownership is
-    // decided by its id alone, before the session is even attached.
-    let session = rex.resolve(&args.target.session)?;
-    entry.session = Some(session.session_id.clone());
-    entry.session_label = Some(session.label.clone());
-    let owned = ctx.owned(&session.session_id)?.is_some();
-    guard::check_send_owned(
-        owned,
-        &session.session_id,
-        &session.label,
-        args.allow_foreign,
-    )?;
-    let located = locate(&mut rex, session, &args.target, true)?;
-    let (sid, bid) = (
-        located.session.session_id.clone(),
-        located.pane.block_id.clone(),
-    );
-    entry.block = Some(bid.clone());
+/// One `send`, and what it has learned about its target so far, which the audit log records
+/// however far it got.
+struct SendAttempt<'a> {
+    args: &'a SendArgs,
+    started: String,
+    session: Option<Session>,
+    block: Option<BlockId>,
+    /// The message was typed into the pane.
+    sent: bool,
+}
 
-    let (seq, records) = rex.program_status(&sid, &bid)?;
-    let initial = records.status();
-    guard::check_status_for_send(initial, args.answer)?;
-    if rex.bracketed_paste(&sid, &bid).ok().flatten() == Some(false) {
-        return Err(Refusal(
-            "the pane hasn't turned on bracketed paste, so it isn't at Claude Code's prompt; use --block if this is the wrong pane".into(),
-        )
-        .into());
+impl<'a> SendAttempt<'a> {
+    fn new(args: &'a SendArgs) -> Self {
+        SendAttempt {
+            args,
+            started: audit::now(),
+            session: None,
+            block: None,
+            sent: false,
+        }
     }
-    let baseline = if args.wait.quiet {
-        None
-    } else {
-        Some(rex.read_text(&sid, &bid)?)
-    };
 
-    rex.write(&sid, &bid, &format!("\x1b[200~{}\x1b[201~", args.message))?;
-    std::thread::sleep(ENTER_DELAY);
-    rex.write(&sid, &bid, "\r")?;
-    *delivered = true;
-    let mut sent = entry.clone();
-    sent.result = "sent".into();
-    ctx.audit.append(&sent)?;
-
-    if out.json {
-        out.event(json!({
-            "type": "sent",
-            "session_id": sid,
-            "session_label": located.session.label,
-            "block_id": bid,
-            "bytes": args.message.len(),
-        }));
-    } else {
-        out.note(&format!(
-            "sent {} bytes to {} {bid}",
-            args.message.len(),
-            located.session.label
-        ));
+    /// An audit entry with this result. After the message is sent, entries carry the time
+    /// they are written; before, the time the attempt began.
+    fn entry(&self, ctx: &Ctx, result: String) -> Entry {
+        let mut entry = Entry::new("send", ctx.endpoint_key()).message(&self.args.message);
+        if !self.sent {
+            entry.timestamp.clone_from(&self.started);
+        }
+        entry.session = Some(match &self.session {
+            Some(session) => session.id.to_string(),
+            None => self.args.target.session.clone(),
+        });
+        entry.session_label = self.session.as_ref().map(|s| s.label.clone());
+        entry.block = self.block.as_ref().map(BlockId::to_string);
+        entry.result = result;
+        entry
     }
-    let watch = Watch {
-        sid,
-        bid,
-        records,
-        seq,
-        tracker: Tracker::after_send(initial),
-        pump: baseline.map(|b| Pump::new(&b, DEFAULT_HOLDBACK)),
-    };
-    let outcome = watch.run(&mut rex, out, &args.wait, timeout(ctx, &args.wait));
-    rex.close();
-    outcome
+
+    fn run(&mut self, ctx: &Ctx, out: &Out) -> Result<Outcome> {
+        let args = self.args;
+        // The flag can only tighten the configured limit.
+        let limit = ctx.config.max_message_bytes();
+        let max = args.max_bytes.map_or(limit, |m| m.min(limit));
+        guard::check_message(&args.message, max)?;
+        let mut rex = ctx.connect()?;
+        // The label is resolved now, as Claude Code may have renamed the session; ownership is
+        // decided by its id alone, before the session is even attached.
+        let session = rex.resolve(&args.target.session)?;
+        self.session = Some(session.clone());
+        let owned = ctx.owned(&session.id)?.is_some();
+        guard::check_send_owned(
+            owned,
+            session.id.as_str(),
+            &session.label,
+            args.allow_foreign,
+        )?;
+        let located = locate(&mut rex, session, &args.target, true)?;
+        let (sid, bid) = (located.session.id, located.pane.block_id);
+        self.block = Some(bid.clone());
+
+        let (seq, records) = rex.program_status(&sid, &bid)?;
+        let initial = records.status();
+        guard::check_status_for_send(initial, args.answer)?;
+        if rex.bracketed_paste(&sid, &bid).ok().flatten() == Some(false) {
+            return Err(Refusal(
+                "the pane hasn't turned on bracketed paste, so it isn't at Claude Code's prompt; use --block if this is the wrong pane".into(),
+            )
+            .into());
+        }
+        let baseline = if args.wait.quiet {
+            None
+        } else {
+            Some(rex.read_text(&sid, &bid)?)
+        };
+
+        rex.write(&sid, &bid, &format!("\x1b[200~{}\x1b[201~", args.message))?;
+        std::thread::sleep(ENTER_DELAY);
+        rex.write(&sid, &bid, "\r")?;
+        self.sent = true;
+        ctx.audit.append(&self.entry(ctx, "sent".into()))?;
+
+        if out.json {
+            out.event(json!({
+                "type": "sent",
+                "session_id": sid,
+                "session_label": located.session.label,
+                "block_id": bid,
+                "bytes": args.message.len(),
+            }));
+        } else {
+            out.note(&format!(
+                "sent {} bytes to {} {bid}",
+                args.message.len(),
+                located.session.label
+            ));
+        }
+        let pump = baseline.map(|b| Pump::new(&b, DEFAULT_HOLDBACK));
+        let watch = Watch {
+            sid,
+            bid,
+            records,
+            seq,
+            tracker: Tracker::after_send(initial),
+            pump,
+        };
+        let outcome = watch.run(&mut rex, out, &args.wait, timeout(ctx, &args.wait));
+        rex.close();
+        outcome
+    }
 }
 
 fn wait(ctx: &Ctx, out: &Out, args: &WaitArgs) -> Result<i32> {
     let mut rex = ctx.connect()?;
     let session = rex.resolve(&args.target.session)?;
     let located = locate(&mut rex, session, &args.target, true)?;
-    let (sid, bid) = (located.session.session_id, located.pane.block_id);
+    let (sid, bid) = (located.session.id, located.pane.block_id);
     let (seq, records) = rex.program_status(&sid, &bid)?;
     let tracker = Tracker::waiting(records.status());
     let pump = if args.wait.quiet {
@@ -634,8 +653,8 @@ fn finish(out: &Out, outcome: Outcome) -> i32 {
 
 /// Follows one pane until its program stops: applies its status events, streams its text.
 struct Watch {
-    sid: String,
-    bid: String,
+    sid: SessionId,
+    bid: BlockId,
     records: Records,
     /// Events up to this seq are already reflected in `records`.
     seq: u64,

@@ -6,10 +6,11 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::exit;
+use crate::ids::BlockId;
 
 pub const TERMINAL_CREATOR: &str = "com.superlogical.terminal";
 
@@ -80,8 +81,7 @@ impl Record {
 }
 
 /// What the relay reports: the folded state, with a blocked state split by what it waits for.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Status {
     #[default]
     Idle,
@@ -124,6 +124,7 @@ impl Status {
         }
     }
 
+    /// The status's name in JSON output and the audit log. This is its only spelling.
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Idle => "idle",
@@ -154,6 +155,12 @@ impl Status {
             Status::NeedsSignIn => exit::NEEDS_SIGN_IN,
             Status::Error => exit::PROGRAM_ERROR,
         }
+    }
+}
+
+impl Serialize for Status {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -219,11 +226,11 @@ pub enum BlockEvent {
 }
 
 /// The block and meaning of a `block_event` payload; `None` for anything but status changes.
-pub fn parse_block_event(payload: &Value) -> Option<(String, BlockEvent)> {
+pub fn parse_block_event(payload: &Value) -> Option<(BlockId, BlockEvent)> {
     if payload["creator_name"] != TERMINAL_CREATOR {
         return None;
     }
-    let block = payload["block_id"].as_str()?.to_owned();
+    let block = BlockId::from(payload["block_id"].as_str()?);
     let body = &payload["payload"];
     let event = match payload["name"].as_str()? {
         "program_status_changed" => BlockEvent::StatusChanged {
@@ -301,7 +308,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn event(line: &str) -> (String, BlockEvent) {
+    fn event(line: &str) -> (BlockId, BlockEvent) {
         parse_block_event(&serde_json::from_str(line).unwrap()).unwrap()
     }
 
@@ -312,7 +319,7 @@ mod tests {
         let (block, changed) = event(
             r#"{"block_id":"block:01a19b73-2201-7d4a-9b0b-39967ffa0cd5","creator_name":"com.superlogical.terminal","name":"program_status_changed","payload":{"id":"build","record":{"id":"build","state":"blocked","kind":"permission","effective_app":"claude","updated_at":"2026-11-02T00:52:57.91185606-08:00"},"reason":"report"}}"#,
         );
-        assert_eq!(block, BLOCK);
+        assert_eq!(block.as_str(), BLOCK);
         let BlockEvent::StatusChanged { id, record } = &changed else {
             panic!("{changed:?}")
         };
@@ -409,6 +416,22 @@ mod tests {
         .collect();
         assert_eq!(codes.len(), 10);
         assert_eq!(Status::Done.exit_code(), 0);
+    }
+
+    #[test]
+    fn serializes_as_its_name() {
+        for status in [
+            Status::Idle,
+            Status::Working,
+            Status::Done,
+            Status::NeedsApproval,
+            Status::Question,
+            Status::NeedsSignIn,
+            Status::NeedsInput,
+            Status::Error,
+        ] {
+            assert_eq!(serde_json::to_value(status).unwrap(), status.as_str());
+        }
     }
 
     #[test]

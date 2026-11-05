@@ -5,12 +5,13 @@ use rexrs::api::session::ViewResponse;
 use rexrs::api::terminal::ProcessResponse;
 use serde::Serialize;
 
+use crate::ids::BlockId;
 use crate::status::{Records, TERMINAL_CREATOR};
 
 /// A terminal block in a session's view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Pane {
-    pub block_id: String,
+    pub block_id: BlockId,
     pub window_id: Option<String>,
     pub window_label: Option<String>,
     pub label: Option<String>,
@@ -25,7 +26,7 @@ pub fn panes(view: &ViewResponse) -> Vec<Pane> {
         let active = window.window_id.is_some() && window.window_id == view.active_window_id;
         for layer in &window.layers {
             for block in &layer.blocks {
-                let Some(block_id) = block.block_id.clone() else {
+                let Some(block_id) = block.block_id.as_deref() else {
                     continue;
                 };
                 let terminal = block.creator_name.as_deref() == Some(TERMINAL_CREATOR)
@@ -36,9 +37,9 @@ pub fn panes(view: &ViewResponse) -> Vec<Pane> {
                 if !terminal {
                     continue;
                 }
-                let focused = active && window.focused_block_id.as_deref() == Some(&block_id);
+                let focused = active && window.focused_block_id.as_deref() == Some(block_id);
                 panes.push(Pane {
-                    block_id,
+                    block_id: block_id.into(),
                     window_id: window.window_id.clone(),
                     window_label: window.label.clone(),
                     label: block.label.clone(),
@@ -135,19 +136,17 @@ pub fn find_block<'a>(panes: &'a [Pane], wanted: &str) -> Result<&'a Pane> {
     if bare.is_empty() {
         bail!("--block is empty");
     }
-    if let Some(pane) = panes
-        .iter()
-        .find(|p| p.block_id == wanted || p.block_id.strip_prefix("block:") == Some(bare))
-    {
+    if let Some(pane) = panes.iter().find(|p| {
+        let id = p.block_id.as_str();
+        id == wanted || id.strip_prefix("block:") == Some(bare)
+    }) {
         return Ok(pane);
     }
     let matches: Vec<_> = panes
         .iter()
         .filter(|p| {
-            p.block_id
-                .strip_prefix("block:")
-                .unwrap_or(&p.block_id)
-                .starts_with(bare)
+            let id = p.block_id.as_str();
+            id.strip_prefix("block:").unwrap_or(id).starts_with(bare)
         })
         .collect();
     match matches.as_slice() {
@@ -233,10 +232,13 @@ mod tests {
     fn finds_blocks_by_id_or_prefix() {
         let panes = panes(&view());
         assert_eq!(
-            find_block(&panes, "block:aaa").unwrap().block_id,
+            find_block(&panes, "block:aaa").unwrap().block_id.as_str(),
             "block:aaa"
         );
-        assert_eq!(find_block(&panes, "abb").unwrap().block_id, "block:abb");
+        assert_eq!(
+            find_block(&panes, "abb").unwrap().block_id.as_str(),
+            "block:abb"
+        );
         assert!(find_block(&panes, "a").is_err(), "ambiguous");
         assert!(find_block(&panes, "zzz").is_err());
         assert!(find_block(&panes, "block:").is_err());
@@ -316,10 +318,16 @@ mod tests {
         };
 
         let one = vec![(panes[0].clone(), claude()), (panes[1].clone(), shell())];
-        assert_eq!(choose_claude(&one).unwrap().0.block_id, "block:aaa");
+        assert_eq!(
+            choose_claude(&one).unwrap().0.block_id.as_str(),
+            "block:aaa"
+        );
 
         let both = vec![(panes[0].clone(), claude()), (panes[1].clone(), claude())];
-        assert_eq!(choose_claude(&both).unwrap().0.block_id, "block:abb");
+        assert_eq!(
+            choose_claude(&both).unwrap().0.block_id.as_str(),
+            "block:abb"
+        );
 
         let mut unfocused = both.clone();
         unfocused[1].0.focused = false;
