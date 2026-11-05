@@ -33,4 +33,5 @@ The first release, under the MIT License.
   rustls.
 - An audit log of every `new`, `send`, and `close`, which records message hashes, never message
   text.
+- An agent skill, `skills/rexctl/SKILL.md`, shipped in release archives.
 - A vendored copy of the rexrs client with API revision 8 patches. See `vendor/rexrs/NOTICE`.

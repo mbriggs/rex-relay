@@ -350,7 +350,7 @@ These rails limit what `rexctl` does. They don't limit other clients of the Rex 
 
 Pushing a tag that matches `Cargo.toml`'s version, such as `v0.1.0`, runs
 `.github/workflows/release.yml`. It builds the binaries, then publishes a GitHub release with one
-archive per target, a `.sha256` file for each, a combined `SHA256SUMS`, and `install.sh`. The
+archive per target (the binary, the agent skill, and the docs), a `.sha256` file for each, a combined `SHA256SUMS`, and `install.sh`. The
 release fails if the tag and the version differ.
 
 ## Development
@@ -410,6 +410,14 @@ dedicated config whose `allowed_endpoints` holds only that server.
 - [ ] `rexctl read "$SID" --lines 20` prints the pane's last 20 lines.
 - [ ] `rexctl close "$SID"` closes the session, removes it from `owned.json`, and logs `closed`.
       Close `fake` in Rex by hand.
+
+## Agent skill
+
+[`skills/rexctl/SKILL.md`](skills/rexctl/SKILL.md) teaches an agent to use `rexctl`: which
+command fits which job, what each exit code means and what to do next, the `DONE:` and
+`BLOCKED:` reply convention, and which flags only the user may approve. Release archives
+include it under `skills/rexctl`. To install it for Claude Code, copy the directory into
+`~/.claude/skills/`.
 
 ## Security
 

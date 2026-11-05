@@ -42,6 +42,8 @@ jobs:
           name="rexctl-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/rexctl" LICENSE README.md CHANGELOG.md "dist/$name/"
+          mkdir -p "dist/$name/skills"
+          cp -R skills/rexctl "dist/$name/skills/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
       - uses: actions/upload-artifact@v4

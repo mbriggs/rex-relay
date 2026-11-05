@@ -1,0 +1,6 @@
+interface:
+  display_name: "rexctl"
+  short_description: "Drive Claude Code and shell panes in Rex sessions with rexctl"
+  default_prompt: "Use $rexctl to hand this task to a Claude Code session in Rex and report how it ended."
+policy:
+  allow_implicit_invocation: true
