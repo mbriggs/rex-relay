@@ -1604,6 +1604,57 @@ fn new_without_a_label_lets_rex_name_the_session() {
     assert!(mock.audit()[0].get("session_label").is_none());
 }
 
+#[test]
+fn new_wait_ready_returns_once_send_would_be_accepted() {
+    // Claude Code is still starting: it runs, but hasn't drawn its prompt.
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.state.lock().unwrap().screen = vec!["$ claude".into()];
+    let state = mock.state.clone();
+    let started = std::time::Instant::now();
+    let ready = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        state.lock().unwrap().screen = screen(&["Welcome to Claude Code"]);
+    });
+    let output = mock.cli(&["--json", "new", "fresh", "--wait-ready", "--timeout", "30s"]);
+    ready.join().unwrap();
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(1500));
+    let events = json_lines(&output);
+    assert_eq!(events[0]["type"], "created");
+    assert_eq!(events.last().unwrap()["exit_code"], 0);
+
+    let output = mock.cli(&["send", "fresh", "hello", "--quiet"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(mock.writes().len(), 2, "the paste, then Enter");
+}
+
+#[test]
+fn new_wait_ready_reports_a_dialog_or_times_out_with_the_pane() {
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.state.lock().unwrap().screen = trust_dialog();
+    let output = mock.cli(&["new", "untrusted", "--wait-ready"]);
+    assert_eq!(code(&output), 10, "{output:?}");
+    assert!(stdout(&output).starts_with("session:new\tuntrusted\t"));
+    assert!(
+        stderr(&output).contains("Dialog: Do you trust the files in this folder?"),
+        "{output:?}"
+    );
+
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.state.lock().unwrap().screen = vec!["$ claude".into(), "starting up".into()];
+    let output = mock.cli(&["new", "slow", "--wait-ready", "--timeout", "1s"]);
+    assert_eq!(code(&output), 15, "{output:?}");
+    assert!(
+        stdout(&output).ends_with("$ claude\nstarting up\n"),
+        "{output:?}"
+    );
+    assert!(stderr(&output).contains("timed out"), "{output:?}");
+    assert!(mock.writes().is_empty());
+
+    // --timeout belongs to --wait-ready.
+    assert_eq!(code(&mock.cli(&["new", "x", "--timeout", "1s"])), 2);
+}
+
 /// The cwd `new` asked Rex to start its pane in, if it created one.
 fn started_in(mock: &Mock) -> Option<Value> {
     let created = mock.state.lock().unwrap().created.clone();

@@ -15,6 +15,9 @@ change the command-line interface.
 - `status` and `tree` show Claude Code's permission mode, read from the footer under its
   prompt: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`, or
   `unknown` when the prompt isn't on screen. JSON output has it as `mode`.
+- `new --wait-ready [--timeout D]` waits until Claude Code is at its input prompt, so a `send`
+  right after it is accepted. A startup dialog exits 10 with its text; a timeout exits 15 with
+  the pane's last lines (#14).
 
 ### Changed
 
