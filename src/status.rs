@@ -312,12 +312,12 @@ mod tests {
         parse_block_event(&serde_json::from_str(line).unwrap()).unwrap()
     }
 
-    const BLOCK: &str = "block:01a19b73-2201-7d4a-9b0b-39967ffa0cd5";
+    const BLOCK: &str = "block:01234567-89ab-cdef-0123-456789abcdef";
 
     #[test]
     fn parses_status_events() {
         let (block, changed) = event(
-            r#"{"block_id":"block:01a19b73-2201-7d4a-9b0b-39967ffa0cd5","creator_name":"com.superlogical.terminal","name":"program_status_changed","payload":{"id":"build","record":{"id":"build","state":"blocked","kind":"permission","effective_app":"claude","updated_at":"2026-11-02T00:52:57.91185606-08:00"},"reason":"report"}}"#,
+            r#"{"block_id":"block:01234567-89ab-cdef-0123-456789abcdef","creator_name":"com.superlogical.terminal","name":"program_status_changed","payload":{"id":"build","record":{"id":"build","state":"blocked","kind":"permission","effective_app":"claude","updated_at":"2026-11-02T08:52:57.911Z"},"reason":"report"}}"#,
         );
         assert_eq!(block.as_str(), BLOCK);
         let BlockEvent::StatusChanged { id, record } = &changed else {
