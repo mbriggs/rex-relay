@@ -2,7 +2,14 @@
 name = "rex-relay"
 version = "0.1.0"
 edition = "2024"
+# File::lock, used by the ownership registry, is stable from 1.89.
+rust-version = "1.89"
 description = "A guarded command-line relay for driving Claude Code panes in Rex sessions"
+repository = "https://github.com/mbriggs/rex-relay"
+readme = "README.md"
+keywords = ["claude-code", "rex", "terminal", "automation", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+# rexrs is a vendored path dependency, which crates.io doesn't accept.
 publish = false
 
 [[bin]]
