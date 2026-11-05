@@ -38,7 +38,7 @@ pub enum Command {
     List,
     /// Show sessions, their tabs, and their panes, with what runs in each pane and its status.
     Tree {
-        /// Only this session: its id or current label.
+        /// Only this session: its id or label.
         session: Option<String>,
     },
     /// Show the status of a session's Claude Code pane.
@@ -78,14 +78,14 @@ pub enum Command {
     Run(RunArgs),
     /// Close a session that rex-relay created. Sessions rex-relay didn't create are never closed.
     Close {
-        /// The session's id (session:…) or current label.
+        /// The session's id (session:…) or label, current or from `new`.
         session: String,
     },
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct Target {
-    /// The session, by id (session:…) or current label, optionally followed by a tab and a
+    /// The session, by id (session:…) or label, optionally followed by a tab and a
     /// pane: session:tab or session:tab:pane, such as solar-creek:shell. Tabs and panes match
     /// by label, id, or number; see `rex-relay tree`.
     #[arg(value_name = "TARGET")]

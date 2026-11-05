@@ -11,6 +11,7 @@ use rexrs::{ClientKind, Event, RexClient};
 use crate::endpoint::Endpoint;
 use crate::ids::{BlockId, SessionId};
 use crate::pane::Scope;
+use crate::registry::Owned;
 use crate::status::Records;
 use crate::transport::{self, Transport};
 
@@ -29,6 +30,17 @@ pub struct Rex {
 pub struct Session {
     pub id: SessionId,
     pub label: String,
+}
+
+impl Session {
+    /// Whether `label` names this session: its current label, or, for a session in `owned`,
+    /// the label `new` gave it.
+    pub fn answers_to(&self, label: &str, owned: &[Owned]) -> bool {
+        self.label == label
+            || owned
+                .iter()
+                .any(|o| o.session_id == self.id && o.label.as_deref() == Some(label))
+    }
 }
 
 /// What `create` made: the session, and the block its program runs in.
@@ -101,9 +113,11 @@ impl Rex {
             .collect())
     }
 
-    /// The session with this id, or else the only one with this label.
-    pub fn resolve(&mut self, wanted: &str) -> Result<Session> {
-        match find_session(&self.sessions()?, wanted)? {
+    /// The session with this id, or else the only one with this label. `owned` holds the
+    /// sessions rex-relay created on this endpoint, whose labels from `new` still resolve after
+    /// Claude Code renames them.
+    pub fn resolve(&mut self, wanted: &str, owned: &[Owned]) -> Result<Session> {
+        match find_session(&self.sessions()?, owned, wanted)? {
             Some(session) => Ok(session),
             None => bail!("no session with id or label {wanted:?}"),
         }
@@ -111,11 +125,12 @@ impl Rex {
 
     /// The session a target names, and the tab and pane after it: `session`, `session:tab`,
     /// or `session:tab:pane`. Session ids and labels can hold colons, so the whole target is
-    /// tried as a session first, then the parts after its last one or two colons.
-    pub fn resolve_target(&mut self, target: &str) -> Result<(Session, Scope)> {
+    /// tried as a session first, then the parts after its last one or two colons. `owned` is
+    /// as for [`Rex::resolve`].
+    pub fn resolve_target(&mut self, target: &str, owned: &[Owned]) -> Result<(Session, Scope)> {
         let sessions = self.sessions()?;
         for (name, scope) in interpretations(target) {
-            if let Some(session) = find_session(&sessions, name)? {
+            if let Some(session) = find_session(&sessions, owned, name)? {
                 return Ok((session, scope));
             }
         }
@@ -341,18 +356,47 @@ impl Rex {
     }
 }
 
-/// The session with this id, or else the only one with this label.
-fn find_session(sessions: &[Session], wanted: &str) -> Result<Option<Session>> {
+/// The session with this id, or else the only one with this label: its current label, or the
+/// label `new` gave it, which Claude Code may since have replaced.
+fn find_session(sessions: &[Session], owned: &[Owned], wanted: &str) -> Result<Option<Session>> {
     if let Some(s) = sessions.iter().find(|s| s.id.as_str() == wanted) {
         return Ok(Some(s.clone()));
     }
-    let labelled: Vec<_> = sessions.iter().filter(|s| s.label == wanted).collect();
+    let labelled: Vec<_> = sessions
+        .iter()
+        .filter(|s| s.answers_to(wanted, owned))
+        .collect();
     match labelled.as_slice() {
         [one] => Ok(Some((*one).clone())),
         [] => Ok(None),
-        _ => bail!("more than one session is labelled {wanted:?}; use its session id"),
+        many => Err(Ambiguous {
+            label: wanted.to_owned(),
+            ids: many.iter().map(|s| s.id.clone()).collect(),
+        }
+        .into()),
     }
 }
+
+/// A label that names more than one session. Exits with [`crate::exit::USAGE`].
+#[derive(Debug)]
+pub struct Ambiguous {
+    pub label: String,
+    pub ids: Vec<SessionId>,
+}
+
+impl std::fmt::Display for Ambiguous {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ids: Vec<&str> = self.ids.iter().map(SessionId::as_str).collect();
+        write!(
+            f,
+            "more than one session is labelled {:?}: {}; use a session id",
+            self.label,
+            ids.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for Ambiguous {}
 
 /// The ways to read a target, most literal first: all session; session and tab; session, tab,
 /// and pane.

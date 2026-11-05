@@ -4,7 +4,7 @@
 pub const OK: i32 = 0;
 /// Connection, protocol, or lookup failure.
 pub const ERROR: i32 = 1;
-/// Bad command-line arguments (clap's code).
+/// Bad command-line arguments (clap's code), or a label that names more than one session.
 pub const USAGE: i32 = 2;
 /// A guard rail refused the request.
 pub const REFUSED: i32 = 3;
