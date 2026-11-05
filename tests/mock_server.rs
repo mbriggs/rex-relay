@@ -847,7 +847,7 @@ fn new_creates_prefixed_session_and_audits() {
         "--cwd",
         "/srv/app",
         "--cmd",
-        "claude --verbose",
+        "claude --verbose --append-system-prompt 'Be terse.'",
         "--purpose",
         "Fix the CI pipeline",
     ]);
@@ -882,7 +882,10 @@ fn new_creates_prefixed_session_and_audits() {
     let block = &created[0]["initial_windows"][0]["layout"]["block"];
     assert_eq!(block["flavor"], "com.superlogical.terminal.shell");
     assert_eq!(block["options"]["cwd"], "/srv/app");
-    assert_eq!(block["options"]["command"], json!(["claude", "--verbose"]));
+    assert_eq!(
+        block["options"]["command"],
+        json!(["claude", "--verbose", "--append-system-prompt", "Be terse."])
+    );
 
     let audit = mock.audit();
     assert_eq!(audit[0]["command"], "new");
@@ -893,6 +896,8 @@ fn new_creates_prefixed_session_and_audits() {
     assert_eq!(code(&again), 3, "duplicate label: {again:?}");
     let bad = mock.rexctl(&["new", "x", "--purpose", "two\nlines"]);
     assert_eq!(code(&bad), 3, "{bad:?}");
+    let bad = mock.rexctl(&["new", "y", "--cmd", "claude 'unclosed"]);
+    assert_eq!(code(&bad), 2, "{bad:?}");
     assert_eq!(mock.state.lock().unwrap().created.len(), 1);
 
     // Sessions rexctl created can be sent to and closed, whatever Claude Code renames them.

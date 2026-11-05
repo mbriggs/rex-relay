@@ -8,7 +8,7 @@ use rexrs::api::session::Session;
 use serde_json::{Value, json};
 
 use crate::audit::{self, AuditLog, Entry};
-use crate::cli::{Cli, Command, SendArgs, Target, WaitArgs, WaitOptions};
+use crate::cli::{Cli, Command, Program, SendArgs, Target, WaitArgs, WaitOptions};
 use crate::config::{self, Config};
 use crate::endpoint::Endpoint;
 use crate::exit;
@@ -299,7 +299,7 @@ fn new(
     out: &Out,
     label: &str,
     cwd: Option<&str>,
-    cmd: &str,
+    cmd: &Program,
     purpose: Option<&str>,
 ) -> Result<i32> {
     let label = guard::prefixed_label(label.trim(), ctx.config.label_prefix());
@@ -331,17 +331,13 @@ fn create(
     ctx: &Ctx,
     label: &str,
     cwd: Option<&str>,
-    cmd: &str,
+    cmd: &Program,
     purpose: Option<&str>,
     entry: &mut Entry,
 ) -> Result<(String, String)> {
     guard::check_label(label)?;
     if let Some(purpose) = purpose {
         guard::check_purpose(purpose)?;
-    }
-    let command: Vec<String> = cmd.split_whitespace().map(str::to_owned).collect();
-    if command.is_empty() {
-        bail!("--cmd is empty");
     }
     if let Some(cwd) = cwd
         && (cwd.is_empty() || cwd.chars().any(char::is_control))
@@ -352,7 +348,7 @@ fn create(
     if rex.sessions()?.iter().any(|s| s.label == label) {
         return Err(Refusal(format!("a session labelled {label:?} already exists")).into());
     }
-    let created = rex.create(label, cwd, &command)?;
+    let created = rex.create(label, cwd, &cmd.0)?;
     rex.close();
     entry.session = Some(created.session_id.clone());
     // Record ownership before anything else can fail: an unrecorded session could never be

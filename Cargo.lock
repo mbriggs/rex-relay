@@ -591,6 +591,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shlex",
  "tempfile",
  "toml",
  "tungstenite",

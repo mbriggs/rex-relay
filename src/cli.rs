@@ -54,9 +54,10 @@ pub enum Command {
         /// The directory the pane starts in, on the Rex host.
         #[arg(long, value_name = "DIR")]
         cwd: Option<String>,
-        /// The program to run, split on whitespace (no shell quoting).
-        #[arg(long, default_value = "claude", value_name = "COMMAND")]
-        cmd: String,
+        /// The program to run and its arguments. Quote arguments as a shell would, such as
+        /// --cmd "claude --append-system-prompt 'Be terse.'"; no shell runs it.
+        #[arg(long, default_value = "claude", value_parser = parse_program, value_name = "COMMAND")]
+        cmd: Program,
         /// What the session is for, kept in the ownership registry and shown by `list`.
         #[arg(long, value_name = "TEXT")]
         purpose: Option<String>,
@@ -122,4 +123,43 @@ pub struct WaitOptions {
     /// How often to read the pane's text, such as 500ms.
     #[arg(long, value_parser = humantime::parse_duration, default_value = "1s", value_name = "DURATION")]
     pub poll: Duration,
+}
+
+/// A program and its arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program(pub Vec<String>);
+
+/// Splits `--cmd` into words with POSIX shell quoting rules.
+fn parse_program(text: &str) -> Result<Program, String> {
+    match shlex::split(text) {
+        Some(words) if !words.is_empty() => Ok(Program(words)),
+        Some(_) => Err("the command is empty".into()),
+        None => Err("the command has an unclosed quote or a trailing backslash".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commands_split_like_a_shell() {
+        assert_eq!(
+            parse_program("claude --append-system-prompt 'Be terse.' --model \"opus 5\"").unwrap(),
+            Program(
+                [
+                    "claude",
+                    "--append-system-prompt",
+                    "Be terse.",
+                    "--model",
+                    "opus 5"
+                ]
+                .map(String::from)
+                .to_vec()
+            )
+        );
+        for bad in ["", "   ", "claude 'unclosed", "claude \\"] {
+            assert!(parse_program(bad).is_err(), "{bad:?}");
+        }
+    }
 }
