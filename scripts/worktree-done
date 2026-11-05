@@ -1,0 +1,54 @@
+#!/bin/sh
+# Usage: scripts/worktree-done <issue|path> [--discard]
+# Remove a worktree whose branch has landed on origin/main, then delete the branch.
+# A squash-merged branch counts as landed when a merged PR's head matches its tip.
+# --discard removes the worktree and branch even if the work never landed.
+set -eu
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "$0")/lib.sh"
+
+discard=
+target=
+for arg in "$@"; do
+	case $arg in
+	--discard) discard=1 ;;
+	-*) usage "unknown option $arg" ;;
+	*)
+		[ -z "$target" ] || usage "usage: worktree-done <issue|path> [--discard]"
+		target=$arg
+		;;
+	esac
+done
+[ -n "$target" ] || usage "usage: worktree-done <issue|path> [--discard]"
+need_repo
+
+if is_number "$target"; then
+	path=$(issue_path "$target")
+else
+	path=$(cd "$target" 2>/dev/null && pwd -P) || usage "no such directory: $target"
+fi
+[ "$path" != "$(primary_root)" ] || usage "refusing to remove the primary checkout"
+case $(pwd -P)/ in "$path"/*) usage "run this from outside $path" ;; esac
+
+branch=$(git worktree list --porcelain | awk -v p="$path" '
+	$1 == "worktree" { cur = substr($0, 10) }
+	$1 == "branch" && cur == p { sub("^refs/heads/", "", $2); print $2 }')
+git worktree list --porcelain | grep -qxF "worktree $path" || usage "$path is not a worktree of this repository"
+
+if [ -z "$discard" ] && [ -n "$branch" ]; then
+	git fetch -q origin main
+	tip=$(git rev-parse "$branch")
+	if ! git merge-base --is-ancestor "$tip" origin/main &&
+		! gh pr list --head "$branch" --state merged --json headRefOid -q '.[].headRefOid' | grep -qx "$tip"; then
+		die "$branch has not landed on origin/main; pass --discard to remove it anyway"
+	fi
+fi
+
+if [ -n "$discard" ]; then
+	git worktree remove --force "$path"
+else
+	git worktree remove "$path" || die "could not remove $path; commit or clean it first"
+fi
+[ -z "$branch" ] || git branch -q -D "$branch"
+git worktree prune
+printf '%s: removed %s%s\n' "$prog" "$path" "${branch:+ and branch $branch}"
