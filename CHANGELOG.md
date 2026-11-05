@@ -5,7 +5,7 @@ change the command-line interface.
 
 ## [0.1.0] - Unreleased
 
-The first release.
+The first release, under the MIT License.
 
 ### Added
 

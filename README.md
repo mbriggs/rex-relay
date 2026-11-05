@@ -331,5 +331,7 @@ dedicated config whose `allowed_endpoints` holds only that server.
 
 ## License
 
-rex-relay doesn't have a license yet. The vendored `vendor/rexrs` is MIT OR Apache-2.0; see
-[`vendor/rexrs/NOTICE`](vendor/rexrs/NOTICE).
+rex-relay is licensed under the [MIT License](LICENSE).
+
+The vendored copy of rexrs in `vendor/rexrs` keeps its own license, MIT OR Apache-2.0, at your
+option. See [`vendor/rexrs/NOTICE`](vendor/rexrs/NOTICE).
