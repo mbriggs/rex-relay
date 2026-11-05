@@ -1,0 +1,28 @@
+[package]
+name = "rex-relay"
+version = "0.1.0"
+edition = "2024"
+description = "A guarded command-line relay for driving Claude Code panes in Rex sessions"
+publish = false
+
+[[bin]]
+name = "rexctl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+humantime = "2"
+# Revision-8 generated types and explicit negotiation range (vendor/rexrs/REX-LINUX.md).
+rexrs = { path = "vendor/rexrs", default-features = false, features = ["tungstenite"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+toml = "0.8"
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+url = "2"
+webpki-roots = "1"
+
+[dev-dependencies]
+tempfile = "3"
