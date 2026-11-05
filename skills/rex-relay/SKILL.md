@@ -50,7 +50,8 @@ When `send` exits 0, find that line near the end of the tail:
 - Neither means the reply ended some other way. Run `rex-relay read <target> --lines 80` and judge.
 
 A session in a directory Claude Code hasn't trusted yet opens with a trust dialog. A person has
-to answer it in Rex. Until then, `send` refuses with exit 3.
+to answer it in Rex. Until then, `send` refuses with exit 3, `status` shows Dialog with the folder,
+and `wait` exits 10 with the dialog's text.
 
 ## Exit codes
 
@@ -60,7 +61,7 @@ to answer it in Rex. Until then, `send` refuses with exit 3.
 | 1 | Error, such as a target that matches nothing. | Read stderr and fix the target. |
 | 2 | Bad arguments, or a label that matches more than one session. | Check `--help`, or use one of the session ids stderr lists. |
 | 3 | A guard rail refused. Nothing was typed. | Read the reason and tell the user. |
-| 10 | Needs approval: Claude Code wants permission for a tool. | Tell the user what it asks (`rex-relay status` shows it). They answer in Rex. |
+| 10 | Needs approval: Claude Code wants permission for a tool, or shows a dialog such as folder trust. | Tell the user what it asks (`rex-relay status` shows it). They answer in Rex. |
 | 11 | Question: Claude Code asked something. | Same as 10. |
 | 12 | Needs input, of an unknown kind. | Same as 10. |
 | 13 | Needs sign-in. | Same as 10. |

@@ -8,7 +8,7 @@ pub const ERROR: i32 = 1;
 pub const USAGE: i32 = 2;
 /// A guard rail refused the request.
 pub const REFUSED: i32 = 3;
-/// The program is waiting for a permission approval.
+/// The program is waiting for a permission approval, or shows a dialog such as folder trust.
 pub const NEEDS_APPROVAL: i32 = 10;
 /// The program asked a question.
 pub const QUESTION: i32 = 11;

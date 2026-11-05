@@ -3,7 +3,7 @@
 use std::fmt;
 
 use crate::endpoint::{self, Endpoint};
-use crate::prompt::Screen;
+use crate::prompt::{Reading, Screen};
 use crate::status::Status;
 
 /// A request a guard rail refused. Exits with [`crate::exit::REFUSED`].
@@ -128,15 +128,25 @@ pub fn check_status_for_send(status: Status, answer: bool) -> Result<(), Refusal
 
 /// `send` types only at Claude Code's input prompt. A menu takes Enter as a choice, so a
 /// message sent to one could pick an option, such as "No, exit" in the folder-trust dialog.
-pub fn check_screen(screen: Screen) -> Result<(), Refusal> {
-    match screen {
-        Screen::Prompt => Ok(()),
-        Screen::Menu => refuse(
-            "the pane shows a menu (such as the folder-trust or a permission dialog), not Claude Code's input prompt; rex-relay never picks menu options",
-        ),
-        Screen::Unknown => refuse(
-            "the pane isn't at Claude Code's input prompt; use --block if this is the wrong pane",
-        ),
+/// The refusal names what the pane shows instead: a dialog, Claude Code still starting (its
+/// prompt or bracketed paste not there yet), or a pane that doesn't run Claude Code.
+/// `paste` is whether the pane turned on bracketed paste, if known.
+pub fn check_ready(reading: &Reading, paste: Option<bool>, claude: bool) -> Result<(), Refusal> {
+    if let Some(dialog) = &reading.dialog {
+        return refuse(format!(
+            "the pane shows a dialog, not Claude Code's input prompt ({}); rex-relay never picks menu options, so a person must answer it in Rex",
+            dialog.summary()
+        ));
+    }
+    if reading.screen == Screen::Prompt && paste != Some(false) {
+        return Ok(());
+    }
+    if claude {
+        refuse(
+            "Claude Code is still starting: its input prompt isn't on screen yet; wait for it and try again",
+        )
+    } else {
+        refuse("the pane doesn't run Claude Code; use --block to choose the right pane")
     }
 }
 
@@ -166,6 +176,7 @@ pub fn check_endpoint(endpoint: &Endpoint, allowlist: &[String]) -> Result<(), R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt;
 
     #[test]
     fn messages_allow_text_newlines_and_tabs() {
@@ -243,10 +254,29 @@ mod tests {
     }
 
     #[test]
-    fn send_needs_the_input_prompt() {
-        check_screen(Screen::Prompt).unwrap();
-        assert!(check_screen(Screen::Menu).is_err());
-        assert!(check_screen(Screen::Unknown).is_err());
+    fn send_refusals_name_the_state() {
+        let refusal = |screen: &str, paste, claude| {
+            check_ready(&prompt::read(screen), paste, claude)
+                .unwrap_err()
+                .0
+        };
+        let prompt = "────\n❯ \n────";
+        check_ready(&prompt::read(prompt), Some(true), true).unwrap();
+        check_ready(&prompt::read(prompt), None, true).unwrap();
+
+        let trust = "────\n Do you trust the files in this folder?\n /srv/app\n ❯ 1. Yes\n   2. No";
+        let dialog = refusal(trust, Some(true), true);
+        assert!(dialog.contains("shows a dialog"), "{dialog}");
+        assert!(dialog.contains("trust /srv/app"), "{dialog}");
+        assert!(dialog.contains("never picks menu options"), "{dialog}");
+
+        for (screen, paste) in [("Loading…", Some(true)), (prompt, Some(false))] {
+            let starting = refusal(screen, paste, true);
+            assert!(starting.contains("still starting"), "{starting}");
+        }
+        let wrong = refusal("$ ls\nsrc\n$", Some(false), false);
+        assert!(wrong.contains("doesn't run Claude Code"), "{wrong}");
+        assert!(wrong.contains("--block"), "{wrong}");
     }
 
     #[test]

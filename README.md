@@ -203,12 +203,17 @@ process (`claude`, or the npm package's `claude-code/cli.js`), or a terminal tit
 
 ### How `send` delivers
 
-Before typing, `send` checks that the pane is at Claude Code's input prompt. It refuses if the
-pane hasn't enabled bracketed paste (mode 2004). It then reads the bottom of the pane's screen
-and looks for the prompt: a `❯` line directly under a `────` rule, or `│ >` under `╭───╮` in
+Before typing, `send` checks that the pane is at Claude Code's input prompt. It reads the bottom
+of the pane's screen and looks for the prompt: a `❯` line directly under a `────` rule, or `│ >` under `╭───╮` in
 older Claude Code versions. If the screen shows a numbered menu instead, such as the
 "Do you trust the files in this folder?" dialog or a permission request, `send` refuses. In a
-menu, Enter picks the highlighted option. A screen that matches neither layout is refused too.
+menu, Enter picks the highlighted option. A screen that matches neither layout, or a pane that
+hasn't enabled bracketed paste (mode 2004), is refused too. The refusal says which it found: a
+dialog, Claude Code still starting, or a pane that doesn't run Claude Code.
+
+Claude Code reports no status for its folder-trust dialog, so `status` and `wait` read the screen
+when the pane is Idle. A menu there is a Dialog: `status` shows the folder it asks about, and
+`wait` exits 10 and prints the dialog's text.
 
 The message is written as one bracketed paste (`ESC[200~ … ESC[201~`), so newlines stay inside
 the message, followed after a short pause by a single carriage return (Enter).
@@ -312,7 +317,7 @@ and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 | 1 | Error: connection, protocol, session or pane not found, pane closed. |
 | 2 | Usage error, including a label that matches more than one session. |
 | 3 | Refused by a guard rail. Nothing was typed. |
-| 10 | Needs approval: Claude Code is waiting for a permission decision. |
+| 10 | Needs approval: Claude Code is waiting for a permission decision, or shows a dialog such as folder trust. |
 | 11 | Question: Claude Code asked a question. |
 | 12 | Needs input: blocked, without saying on what. |
 | 13 | Needs sign-in: waiting for a login or credential. |
@@ -399,7 +404,8 @@ dedicated config whose `allowed_endpoints` holds only that server.
       new label and by its original label both work.
 - [ ] A multi-line message arrives as one prompt (bracketed paste) and is submitted once.
 - [ ] `rex-relay new` in a directory Claude Code hasn't trusted yet, then an immediate
-      `rex-relay send`, exits 3 with "never picks menu options". The trust dialog stays open.
+      `rex-relay send`, exits 3 with "never picks menu options". The trust dialog stays open, and
+      `rex-relay wait` exits 10 and prints its text.
 - [ ] `rex-relay send "$SID" "Create hello.txt containing hi."` exits 10 at the permission prompt
       (with default permissions); a second plain `send` then exits 3; nothing was approved.
 - [ ] Answer the prompt in Rex by hand, then `rex-relay wait "$SID"` exits 0 once done.

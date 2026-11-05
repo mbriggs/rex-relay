@@ -12,6 +12,8 @@
 //! draws faint (SGR 2) in an empty box. Plain text has no styles, so read the `vt` format when
 //! the input matters.
 
+use crate::status::Status;
+
 /// How many lines from the bottom of the pane's text are searched.
 const BOTTOM: usize = 40;
 
@@ -32,6 +34,66 @@ pub struct Reading {
     /// The text in the input box that nobody sent, if the screen is the prompt and the box
     /// isn't empty. Faint text, such as the placeholder, doesn't count.
     pub input: Option<String>,
+    /// The menu's dialog, if the screen is a menu.
+    pub dialog: Option<Dialog>,
+}
+
+impl Reading {
+    /// A dialog the program doesn't report in its status, such as the folder-trust dialog
+    /// Claude Code shows before its prompt. A permission request reports a blocked status.
+    pub fn startup_dialog(&self, status: Status) -> Option<&Dialog> {
+        self.dialog.as_ref().filter(|_| status == Status::Idle)
+    }
+}
+
+/// A dialog with a numbered menu, as the pane shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dialog {
+    /// The dialog's lines without box borders, from its top edge to the bottom of the pane.
+    pub text: String,
+    /// The folder a trust dialog asks about.
+    pub folder: Option<String>,
+}
+
+impl Dialog {
+    fn parse(lines: &[Line]) -> Self {
+        let first_option = lines
+            .iter()
+            .position(|l| is_menu_line(&l.plain))
+            .unwrap_or_default();
+        let top = lines[..first_option]
+            .iter()
+            .rposition(|l| is_rule(&l.plain))
+            .map_or(0, |i| i + 1);
+        let body: Vec<&str> = lines[top..]
+            .iter()
+            .filter(|l| !is_edge(&l.plain))
+            .map(|l| unboxed(&l.plain))
+            .collect();
+        let start = body
+            .iter()
+            .position(|l| !l.is_empty())
+            .unwrap_or(body.len());
+        let end = body
+            .iter()
+            .rposition(|l| !l.is_empty())
+            .map_or(start, |i| i + 1);
+        let text = body[start..end].join("\n");
+        let folder = text
+            .contains("trust")
+            .then(|| body.iter().find(|l| l.starts_with(['/', '~'])))
+            .flatten()
+            .map(|l| l.to_string());
+        Dialog { text, folder }
+    }
+
+    /// One line about the dialog: the folder a trust dialog names, or its first line.
+    pub fn summary(&self) -> String {
+        match &self.folder {
+            Some(folder) => format!("asks whether to trust {folder}"),
+            None => self.text.lines().next().unwrap_or_default().to_owned(),
+        }
+    }
 }
 
 /// Reads the bottom of a pane's text: Rex's `vt` format, or plain text.
@@ -50,16 +112,20 @@ pub fn read(screen: &str) -> Reading {
         return Reading {
             screen: Screen::Prompt,
             input: input(&bottom[at..]),
+            dialog: None,
         };
     }
-    let screen = if bottom.iter().any(|l| is_menu_line(&l.plain)) {
-        Screen::Menu
-    } else {
-        Screen::Unknown
-    };
+    if bottom.iter().any(|l| is_menu_line(&l.plain)) {
+        return Reading {
+            screen: Screen::Menu,
+            input: None,
+            dialog: Some(Dialog::parse(bottom)),
+        };
+    }
     Reading {
-        screen,
+        screen: Screen::Unknown,
         input: None,
+        dialog: None,
     }
 }
 
@@ -283,6 +349,60 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_trust_dialog_and_its_folder() {
+        let boxed = [
+            "● earlier output",
+            "╭──────────────────────────────────────────╮",
+            "│ Do you trust the files in this folder?   │",
+            "│                                          │",
+            "│ /srv/app                                 │",
+            "│                                          │",
+            "│ ❯ 1. Yes, proceed                        │",
+            "│   2. No, exit                            │",
+            "╰──────────────────────────────────────────╯",
+            "   Enter to confirm · Esc to exit",
+            "",
+        ];
+        let dialog = read(&boxed.join("\n")).dialog.unwrap();
+        assert_eq!(
+            dialog.text,
+            "Do you trust the files in this folder?\n\n/srv/app\n\n❯ 1. Yes, proceed\n2. No, exit\nEnter to confirm · Esc to exit"
+        );
+        assert_eq!(dialog.folder.as_deref(), Some("/srv/app"));
+        assert_eq!(dialog.summary(), "asks whether to trust /srv/app");
+
+        let current = [
+            "Welcome to Claude Code",
+            RULE,
+            " Accessing workspace:",
+            "",
+            " ~/src/app",
+            "",
+            " Quick safety check: Is this a project you created or one you trust?",
+            "",
+            " ❯ 1. Yes, I trust this folder",
+            "   2. No, exit",
+        ];
+        let dialog = read(&current.join("\n")).dialog.unwrap();
+        assert!(
+            dialog
+                .text
+                .starts_with("Accessing workspace:\n\n~/src/app\n")
+        );
+        assert_eq!(dialog.folder.as_deref(), Some("~/src/app"));
+    }
+
+    #[test]
+    fn only_unreported_menus_are_startup_dialogs() {
+        let menu = read(" Pick a theme\n ❯ 1. Dark\n   2. Light");
+        let dialog = menu.startup_dialog(Status::Idle).unwrap();
+        assert_eq!(dialog.folder, None);
+        assert_eq!(dialog.summary(), "Pick a theme");
+        assert_eq!(menu.startup_dialog(Status::NeedsApproval), None);
+        assert_eq!(read(&current(&["❯ "])).startup_dialog(Status::Idle), None);
+    }
+
+    #[test]
     fn a_menu_below_the_prompt_wins() {
         let screen = current(&[
             "❯ ",
@@ -325,7 +445,8 @@ mod tests {
             read(&vt("")),
             Reading {
                 screen: Screen::Prompt,
-                input: None
+                input: None,
+                dialog: None,
             }
         );
         let placeholder = vt("\x1b[0m\x1b[2mTry \"fix lint errors\"\x1b[0m");

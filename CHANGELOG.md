@@ -5,6 +5,17 @@ change the command-line interface.
 
 ## Unreleased
 
+### Added
+
+- A Dialog status for menus Claude Code shows without reporting a status, such as the
+  folder-trust dialog. `status` shows the folder it names, and `wait` exits 10 and prints the
+  dialog's text instead of reporting Idle.
+
+### Changed
+
+- `send`'s refusals at the screen check name what the pane shows: a dialog, Claude Code still
+  starting, or a pane that doesn't run Claude Code. Only the last one suggests `--block`.
+
 ### Fixed
 
 - The label given to `new` keeps resolving for `status`, `read`, `wait`, `send`, `run`, `tree`,
