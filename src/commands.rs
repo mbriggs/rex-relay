@@ -15,7 +15,7 @@ use crate::guard::{self, Refusal};
 use crate::ids::{BlockId, SessionId};
 use crate::output::{DEFAULT_HOLDBACK, Pump};
 use crate::pane::{self, Evidence, Pane, Scope};
-use crate::prompt;
+use crate::prompt::{self, Mode};
 use crate::registry::{Owned, Registry};
 use crate::rex::{self, Ambiguous, Rex, Session, Unreachable};
 use crate::status::{self, Records, Status, Tracker};
@@ -180,13 +180,18 @@ fn execute(cli: &Cli, out: &Out) -> Result<i32> {
             label,
             cwd,
             cmd,
+            auto,
             purpose,
         } => new(
             &ctx,
             out,
             label.as_deref(),
             cwd.as_deref(),
-            cmd,
+            &if *auto {
+                Program::claude_auto()
+            } else {
+                cmd.clone()
+            },
             purpose.as_deref(),
         ),
         Command::Send(args) => send(&ctx, out, args),
@@ -297,11 +302,17 @@ fn tree(ctx: &Ctx, out: &Out, only: Option<&str>) -> Result<i32> {
     rex.observe_all()?;
     for session in &sessions {
         let view = rex.view(&session.id)?;
-        let panes: Vec<(Pane, Evidence)> = pane::panes(&view)
+        let panes: Vec<(Pane, Evidence, Option<Mode>)> = pane::panes(&view)
             .into_iter()
             .map(|pane| {
                 let evidence = gather(&mut rex, &session.id, &pane);
-                (pane, evidence)
+                // Only Claude Code has a permission mode; a pane whose screen can't be read
+                // still gets listed.
+                let mode = evidence.claude_reason().map(|_| {
+                    rex.screen_vt(&session.id, &pane.block_id)
+                        .map_or(Mode::Unknown, |screen| prompt::read(&screen).mode)
+                });
+                (pane, evidence, mode)
             })
             .collect();
         let mine = owned.iter().find(|o| o.session_id == session.id);
@@ -318,19 +329,30 @@ fn tree(ctx: &Ctx, out: &Out, only: Option<&str>) -> Result<i32> {
     Ok(exit::OK)
 }
 
-/// A pane's status for listings: its label and message, or nothing without status records.
-fn pane_status(evidence: &Evidence) -> Option<String> {
-    if evidence.records.is_empty() {
-        return None;
+/// A pane's status for listings: its label, Claude Code's permission mode, and the message.
+/// Nothing for a pane with neither status records nor a mode.
+fn pane_status(evidence: &Evidence, mode: Option<Mode>) -> Option<String> {
+    let mut text =
+        (!evidence.records.is_empty()).then(|| evidence.records.status().label().to_owned());
+    if let Some(mode) = mode {
+        let mode = format!("[{}]", mode.as_str());
+        text = Some(match text {
+            Some(status) => format!("{status} {mode}"),
+            None => mode,
+        });
     }
-    let status = evidence.records.status();
-    Some(match evidence.records.msg() {
-        Some(msg) => format!("{}: {msg}", status.label()),
-        None => status.label().to_owned(),
-    })
+    if let (Some(text), Some(msg)) = (text.as_mut(), evidence.records.msg()) {
+        text.push_str(&format!(": {msg}"));
+    }
+    text
 }
 
-fn print_tree(out: &Out, session: &Session, mine: Option<&Owned>, panes: &[(Pane, Evidence)]) {
+fn print_tree(
+    out: &Out,
+    session: &Session,
+    mine: Option<&Owned>,
+    panes: &[(Pane, Evidence, Option<Mode>)],
+) {
     let mark = if mine.is_some() { "*" } else { " " };
     let mut line = format!("{mark} {}  {}", session.label, session.id);
     if let Some(purpose) = mine.and_then(|o| o.purpose.as_deref()) {
@@ -338,7 +360,7 @@ fn print_tree(out: &Out, session: &Session, mine: Option<&Owned>, panes: &[(Pane
     }
     out.line(&line);
     let mut tab = 0;
-    for (pane, evidence) in panes {
+    for (pane, evidence, mode) in panes {
         if pane.tab != tab {
             tab = pane.tab;
             let mut line = format!(
@@ -357,7 +379,7 @@ fn print_tree(out: &Out, session: &Session, mine: Option<&Owned>, panes: &[(Pane
             pane.label.as_deref().unwrap_or("-"),
             pane.block_id,
             evidence.program().as_deref().unwrap_or("-"),
-            pane_status(evidence).as_deref().unwrap_or("-"),
+            pane_status(evidence, *mode).as_deref().unwrap_or("-"),
         );
         if pane.focused {
             line.push_str("  [focused]");
@@ -366,9 +388,13 @@ fn print_tree(out: &Out, session: &Session, mine: Option<&Owned>, panes: &[(Pane
     }
 }
 
-fn tree_json(session: &Session, mine: Option<&Owned>, panes: &[(Pane, Evidence)]) -> Value {
+fn tree_json(
+    session: &Session,
+    mine: Option<&Owned>,
+    panes: &[(Pane, Evidence, Option<Mode>)],
+) -> Value {
     let mut tabs: Vec<Value> = Vec::new();
-    for (pane, evidence) in panes {
+    for (pane, evidence, mode) in panes {
         if tabs.len() < pane.tab {
             tabs.push(json!({
                 "tab": pane.tab,
@@ -390,6 +416,7 @@ fn tree_json(session: &Session, mine: Option<&Owned>, panes: &[(Pane, Evidence)]
                 "program": evidence.program(),
                 "claude": evidence.claude_reason().is_some(),
                 "status": status,
+                "mode": mode,
                 "msg": evidence.records.msg(),
             }));
     }
@@ -446,12 +473,9 @@ fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
     let located = find(ctx, &mut rex, target, false, pane::choose_claude)?;
     let (sid, bid) = (&located.session.id, &located.pane.block_id);
     let mut status = located.evidence.records.status();
-    let reading = match status {
-        Status::Idle => Some(prompt::read(&rex.screen_vt(sid, bid)?)),
-        _ => None,
-    };
+    let reading = prompt::read(&rex.screen_vt(sid, bid)?);
     rex.close();
-    let dialog = reading.as_ref().and_then(|r| r.startup_dialog(status));
+    let dialog = reading.startup_dialog(status);
     let summary = dialog.map(prompt::Dialog::summary);
     if dialog.is_some() {
         status = Status::Dialog;
@@ -468,16 +492,18 @@ fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
             "msg": msg,
             "dialog": dialog.map(|d| &d.text),
             "folder": dialog.and_then(|d| d.folder.as_deref()),
+            "mode": reading.mode,
             "program": located.evidence.program(),
             "claude": located.evidence.claude_reason(),
         }));
     } else {
         let mut line = format!(
-            "{} ({}) {}: {}",
+            "{} ({}) {}: {} [{}]",
             located.session.label,
             located.session.id,
             located.pane.block_id,
-            status.label()
+            status.label(),
+            reading.mode.as_str()
         );
         if let Some(msg) = msg {
             line.push_str(&format!(" — {msg}"));

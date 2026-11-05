@@ -1294,7 +1294,7 @@ fn status_and_wait_report_the_trust_dialog() {
     let output = mock.cli(&["status", "demo"]);
     assert_eq!(code(&output), 0, "{output:?}");
     assert!(
-        stdout(&output).contains(": Dialog — asks whether to trust /srv/app"),
+        stdout(&output).contains(": Dialog [unknown] — asks whether to trust /srv/app"),
         "{output:?}"
     );
     let status = &json_lines(&mock.cli(&["--json", "status", "demo"]))[0];
@@ -1564,6 +1564,21 @@ fn new_creates_a_session_and_audits() {
 }
 
 #[test]
+fn new_auto_starts_claude_in_auto_mode() {
+    let mock = demo(vec![], AfterEnter::Done);
+    let both = mock.cli(&["new", "y", "--auto", "--cmd", "claude"]);
+    assert_eq!(code(&both), 2, "--auto and --cmd conflict: {both:?}");
+
+    let output = mock.cli(&["new", "auto-bot", "--auto"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    let created = mock.state.lock().unwrap().created.clone();
+    assert_eq!(
+        created.last().unwrap()["initial_windows"][0]["layout"]["block"]["options"]["command"],
+        json!(["claude", "--permission-mode", "auto"])
+    );
+}
+
+#[test]
 fn new_without_a_label_lets_rex_name_the_session() {
     let mock = demo(vec![], AfterEnter::Done);
     let output = mock.cli(&["new", "--cwd", "/srv/app"]);
@@ -1695,12 +1710,24 @@ fn list_status_and_read() {
     assert_eq!(status["status"], "working");
     assert_eq!(status["msg"], "Editing files");
     assert_eq!(status["program"], "claude");
+    assert_eq!(status["mode"], "default");
 
     let output = mock.cli(&["status", SID]);
     assert!(
-        stdout(&output).contains("Working — Editing files"),
+        stdout(&output).contains("Working [default] — Editing files"),
         "{output:?}"
     );
+    // The footer names any mode but the default.
+    mock.state
+        .lock()
+        .unwrap()
+        .screen
+        .last_mut()
+        .unwrap()
+        .replace_range(.., "  ⏵⏵ auto mode on (shift+tab to cycle)");
+    let status = &json_lines(&mock.cli(&["--json", "status", "demo"]))[0];
+    assert_eq!(status["mode"], "auto");
+    mock.state.lock().unwrap().screen = screen(&[]);
 
     let output = mock.cli(&["read", "demo", "--lines", "2"]);
     assert_eq!(code(&output), 0, "{output:?}");
@@ -1729,9 +1756,15 @@ fn tree_shows_tabs_panes_and_status() {
     assert_eq!(panes[0]["label"], "shell");
     assert_eq!(panes[0]["program"], "bash");
     assert_eq!(panes[0]["status"], Value::Null);
+    assert_eq!(
+        panes[0]["mode"],
+        Value::Null,
+        "a shell has no permission mode"
+    );
     assert_eq!(panes[1]["pane"], 2);
     assert_eq!(panes[1]["claude"], true);
     assert_eq!(panes[1]["status"], "working");
+    assert_eq!(panes[1]["mode"], "default");
     assert_eq!(panes[1]["msg"], "Editing files");
 
     let output = mock.cli(&["tree", "demo"]);
@@ -1743,7 +1776,7 @@ fn tree_shows_tabs_panes_and_status() {
     assert!(text.contains("    1  main  window:1  [active]\n"), "{text}");
     assert!(
         text.contains(&format!(
-            "        1:2  claude  {}  claude  Working: Editing files  [focused]",
+            "        1:2  claude  {}  claude  Working [default]: Editing files  [focused]",
             claude(vec![]).id
         )),
         "{text}"

@@ -23,9 +23,9 @@ that matches two sessions exits 2 and lists their ids.
 | --- | --- |
 | `rex-relay tree [session]` | See sessions, tabs, panes, what runs in each, and each pane's status. |
 | `rex-relay list` | See sessions. `*` marks the ones you created, which `send` and `run` accept. |
-| `rex-relay status <target>` | Check whether Claude Code is working, done, or waiting on a person. |
+| `rex-relay status <target>` | Check whether Claude Code is working, done, or waiting on a person, and its permission mode (`[auto]`, `[default]`, …; `[unknown]` when the prompt isn't on screen). |
 | `rex-relay read <target> --lines N` | Read the last lines of a pane. |
-| `rex-relay new [label] --cwd DIR --purpose TEXT` | Start a Claude Code session you own. Keep the session id it prints. `DIR` is a path on the Rex host; quote `~/...` so the Rex host expands it, not your shell. |
+| `rex-relay new [label] --cwd DIR --purpose TEXT [--auto]` | Start a Claude Code session you own; `--auto` starts it in auto permission mode. Keep the session id it prints. `DIR` is a path on the Rex host; quote `~/...` so the Rex host expands it, not your shell. |
 | `rex-relay send <target> "<task>"` | Hand Claude Code a task, then wait until it stops. |
 | `rex-relay wait <target>` | Keep waiting on a pane that is still working, without typing anything. |
 | `rex-relay run <target> -- '<command line>'` | Run one shell command in a shell pane idle at its prompt. |
