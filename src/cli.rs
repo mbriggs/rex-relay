@@ -96,6 +96,11 @@ pub struct SendArgs {
     /// still refused: send only types at Claude Code's input prompt.
     #[arg(long)]
     pub answer: bool,
+    /// If Claude Code's input box already holds unsent text, clear it before typing. Without
+    /// this, send refuses. Clearing uses Ctrl+E and Ctrl+U, which edit the input and never
+    /// interrupt Claude Code.
+    #[arg(long)]
+    pub clear_input: bool,
     /// Lowers the largest message allowed, in bytes, below the config's `max_message_bytes`
     /// (default 32768). It can't raise it.
     #[arg(long, value_name = "BYTES")]

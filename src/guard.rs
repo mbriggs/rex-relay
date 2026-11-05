@@ -130,6 +130,15 @@ pub fn check_screen(screen: Screen) -> Result<(), Refusal> {
     }
 }
 
+/// Unsent text in Claude Code's input box would join the message. Only its length is reported,
+/// because the refusal goes to the audit log.
+pub fn leftover_input(input: &str) -> Refusal {
+    Refusal(format!(
+        "Claude Code's input box already holds {} characters of unsent text; pass --clear-input to clear it first",
+        input.chars().count()
+    ))
+}
+
 pub fn check_endpoint(endpoint: &Endpoint, allowlist: &[String]) -> Result<(), Refusal> {
     if endpoint::is_allowed(endpoint, allowlist) {
         return Ok(());

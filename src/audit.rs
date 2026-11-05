@@ -28,6 +28,9 @@ pub struct Entry {
     pub msg_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub msg_len: Option<usize>,
+    /// `send --clear-input` cleared unsent text from the input box first. The text isn't logged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub input_cleared: bool,
     /// Such as `created`, `sent`, `done`, `needs_approval`, `timeout`, `closed`, `refused: …`,
     /// `error: …`.
     pub result: String,

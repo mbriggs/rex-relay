@@ -180,6 +180,19 @@ impl Rex {
             .map(|m| m.set))
     }
 
+    /// The pane's screen, without scrollback, in the `vt` format: escape sequences that keep
+    /// its text styles.
+    pub fn screen_vt(&mut self, session_id: &SessionId, block_id: &BlockId) -> Result<String> {
+        Ok(self
+            .client
+            .call(
+                terminal::Format::new()
+                    .format("vt")
+                    .on(session_id.as_str(), block_id.as_str()),
+            )?
+            .content)
+    }
+
     /// The pane's screen and scrollback as plain text.
     pub fn read_text(&mut self, session_id: &SessionId, block_id: &BlockId) -> Result<String> {
         const CHUNK: i64 = 512 * 1024;

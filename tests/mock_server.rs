@@ -65,6 +65,10 @@ struct State {
     refuse: usize,
     /// A record to report as an event once a reconnected client reads the status.
     after_reconnect: Option<(String, String, Value)>,
+    /// Unsent text in the prompt box (the line equal to `BOX[1]`).
+    input: String,
+    /// The input box ignores Ctrl+U.
+    sticky_input: bool,
 }
 
 fn screen(body: &[&str]) -> Vec<String> {
@@ -135,6 +139,8 @@ impl Mock {
             hellos: vec![],
             refuse: 0,
             after_reconnect: None,
+            input: String::new(),
+            sticky_input: false,
         }));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -330,6 +336,32 @@ fn accept_control(_: &Request, mut response: Response) -> Result<Response, Error
     Ok(response)
 }
 
+/// The screen as `format` returns it: `vt` keeps escape sequences, `text` drops them.
+fn render(state: &State, vt: bool) -> String {
+    let lines: Vec<String> = state
+        .screen
+        .iter()
+        .map(|line| {
+            if line == BOX[1] && !state.input.is_empty() {
+                format!("│ > {} │", state.input)
+            } else {
+                line.clone()
+            }
+        })
+        .collect();
+    if vt {
+        return lines.join("\r\n");
+    }
+    let mut text = lines.join("\n");
+    while let Some(start) = text.find('\x1b') {
+        let end = text[start..]
+            .find('m')
+            .map_or(text.len(), |e| start + e + 1);
+        text.replace_range(start..end, "");
+    }
+    text
+}
+
 /// Stores `record` as the pane's only record, as a status read would return it.
 fn set_records(state: &Mutex<State>, session: &str, block: &str, record: Value) {
     let mut state = state.lock().unwrap();
@@ -523,11 +555,17 @@ fn handle(
                 ".title" => Ok(json!({"title": ""})),
                 ".modes" => Ok(json!({"screen": "primary", "modes": [
                     {"name": "bracketed_paste", "number": 2004, "set": block.bracketed_paste}]})),
-                ".format" => Ok(json!({"content": s.screen.join("\n")})),
+                ".format" => {
+                    let vt = payload["args"]["format"] == "vt";
+                    Ok(json!({"content": render(&s, vt)}))
+                }
                 ".write" => {
                     let data = payload["args"]["data"].as_str().unwrap().to_owned();
                     s.writes.push((sid.clone(), bid.clone(), data.clone()));
                     let reply = Ok(json!({"bytes_written": data.len()}));
+                    if data == "\x15" && !s.sticky_input {
+                        s.input.clear();
+                    }
                     if data == "\r" {
                         s.screen = screen(&[
                             "Welcome to Claude Code",
@@ -1041,6 +1079,76 @@ fn send_refuses_menus_like_the_trust_dialog() {
     let output = mock.rexctl(&["send", "demo", "hello"]);
     assert_eq!(code(&output), 3, "{output:?}");
     assert!(mock.writes().is_empty());
+}
+
+#[test]
+fn send_refuses_leftover_input_unless_told_to_clear_it() {
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.state.lock().unwrap().input = "half a thought".into();
+    let output = mock.rexctl(&["send", "demo", "fix the bug", "--quiet"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    let err = stderr(&output);
+    assert!(err.contains("14 characters of unsent text"), "{err}");
+    assert!(err.contains("--clear-input"), "{err}");
+    assert!(mock.writes().is_empty());
+    // The refusal is audited without the leftover text.
+    let raw = std::fs::read_to_string(mock.audit_path()).unwrap();
+    assert!(!raw.contains("half a thought"), "{raw}");
+
+    let output = mock.rexctl(&["send", "demo", "fix the bug", "--quiet", "--clear-input"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    let keys: Vec<String> = mock.writes().into_iter().map(|w| w.2).collect();
+    assert_eq!(
+        keys,
+        ["\x05", "\x15", "\x1b[200~fix the bug\x1b[201~", "\r"],
+        "Ctrl+E and Ctrl+U, then the message"
+    );
+    let audit = mock.audit();
+    assert_eq!(audit.last().unwrap()["input_cleared"], true);
+    assert!(audit[0].get("input_cleared").is_none(), "{audit:?}");
+}
+
+#[test]
+fn the_placeholder_isnt_leftover_input() {
+    let mock = demo(vec![], AfterEnter::Done);
+    {
+        let mut state = mock.state.lock().unwrap();
+        let at = state.screen.iter().position(|l| l == BOX[1]).unwrap();
+        state.screen[at] = "│ > \x1b[2mTry \"fix lint errors\"\x1b[0m │".into();
+    }
+    let output = mock.rexctl(&["send", "demo", "hello", "--quiet"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(mock.writes().len(), 2, "no clearing keys");
+}
+
+#[test]
+fn clear_input_never_types_outside_the_prompt() {
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.state.lock().unwrap().screen = vec![
+        " Do you trust the files in this folder?".into(),
+        " ❯ 1. Yes, proceed".into(),
+        "   2. No, exit".into(),
+    ];
+    let output = mock.rexctl(&["send", "demo", "hi", "--clear-input"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(mock.writes().is_empty());
+
+    // An input box that won't clear: give up after a few tries, and send nothing.
+    let mock = demo(vec![], AfterEnter::Done);
+    {
+        let mut state = mock.state.lock().unwrap();
+        state.input = "stuck".into();
+        state.sticky_input = true;
+    }
+    let output = mock.rexctl(&["send", "demo", "hi", "--clear-input"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(stderr(&output).contains("couldn't clear"), "{output:?}");
+    let writes = mock.writes();
+    assert!(
+        writes.iter().all(|w| w.2 == "\x05" || w.2 == "\x15"),
+        "{writes:?}"
+    );
+    assert!(writes.len() <= 2 * 4, "{writes:?}");
 }
 
 #[test]

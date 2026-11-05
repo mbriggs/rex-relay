@@ -26,6 +26,11 @@ const STATUS_POLL: Duration = Duration::from_secs(3);
 /// The pause between pasting a message and pressing Enter, so the program has taken in the
 /// paste before Enter arrives.
 const ENTER_DELAY: Duration = Duration::from_millis(250);
+/// The pause after a clearing keystroke, so Claude Code has redrawn its input box.
+const KEY_DELAY: Duration = Duration::from_millis(150);
+/// Clearing keystroke pairs `--clear-input` may send before it gives up. Each pair clears one
+/// line or joins an empty line to the one above.
+const MAX_CLEAR_STEPS: usize = 40;
 
 /// Runs the command and returns the process exit code.
 pub fn run(cli: &Cli) -> i32 {
@@ -514,6 +519,8 @@ struct SendAttempt<'a> {
     block: Option<BlockId>,
     /// The message was typed into the pane.
     sent: bool,
+    /// Unsent text was cleared from the input box first.
+    input_cleared: bool,
 }
 
 impl<'a> SendAttempt<'a> {
@@ -524,6 +531,7 @@ impl<'a> SendAttempt<'a> {
             session: None,
             block: None,
             sent: false,
+            input_cleared: false,
         }
     }
 
@@ -540,6 +548,7 @@ impl<'a> SendAttempt<'a> {
         });
         entry.session_label = self.session.as_ref().map(|s| s.label.clone());
         entry.block = self.block.as_ref().map(BlockId::to_string);
+        entry.input_cleared = self.input_cleared;
         entry.result = result;
         entry
     }
@@ -575,8 +584,16 @@ impl<'a> SendAttempt<'a> {
             )
             .into());
         }
+        let reading = prompt::read(&rex.screen_vt(&sid, &bid)?);
+        guard::check_screen(reading.screen)?;
+        if let Some(input) = reading.input {
+            if !args.clear_input {
+                return Err(guard::leftover_input(&input).into());
+            }
+            clear_input(&mut rex, &sid, &bid)?;
+            self.input_cleared = true;
+        }
         let screen = rex.read_text(&sid, &bid)?;
-        guard::check_screen(prompt::classify(&screen))?;
 
         rex.write(&sid, &bid, &format!("\x1b[200~{}\x1b[201~", args.message))?;
         std::thread::sleep(ENTER_DELAY);
@@ -610,6 +627,36 @@ impl<'a> SendAttempt<'a> {
         };
         watch.run(rex, ctx, out, &args.wait)
     }
+}
+
+/// Clears unsent text from Claude Code's input box with Ctrl+E (end of line) and Ctrl+U (delete
+/// to the start of the line, or the line break before it). Both only edit the input. Ctrl+C
+/// would also clear it, but interrupts Claude Code while it works. Each step re-reads the screen
+/// and stops at once if the pane is no longer at the prompt.
+fn clear_input(rex: &mut Rex, sid: &SessionId, bid: &BlockId) -> Result<()> {
+    let mut last = None;
+    let mut stuck = 0;
+    for _ in 0..MAX_CLEAR_STEPS {
+        for key in ["\x05", "\x15"] {
+            rex.write(sid, bid, key)?;
+            std::thread::sleep(KEY_DELAY);
+        }
+        let reading = prompt::read(&rex.screen_vt(sid, bid)?);
+        guard::check_screen(reading.screen)?;
+        let Some(input) = reading.input else {
+            return Ok(());
+        };
+        if last.as_ref() == Some(&input) {
+            stuck += 1;
+            if stuck == 3 {
+                break;
+            }
+        } else {
+            stuck = 0;
+        }
+        last = Some(input);
+    }
+    Err(Refusal("couldn't clear Claude Code's input box; nothing was sent".into()).into())
 }
 
 fn wait(ctx: &Ctx, out: &Out, args: &WaitArgs) -> Result<i32> {

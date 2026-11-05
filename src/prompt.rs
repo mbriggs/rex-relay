@@ -6,6 +6,11 @@
 //! whose cursor line also starts with `❯`. Enter in such a menu picks the highlighted option,
 //! so a pasted message followed by Enter could answer "No, exit" or "Yes, allow". Anything
 //! that isn't recognizably the prompt is treated as not the prompt.
+//!
+//! The input box can also hold text nobody sent. Rex's `vt` format keeps text styles, which
+//! tell typed text from the placeholder suggestion (`Try "fix lint errors"`) that Claude Code
+//! draws faint (SGR 2) in an empty box. Plain text has no styles, so read the `vt` format when
+//! the input matters.
 
 /// How many lines from the bottom of the pane's text are searched.
 const BOTTOM: usize = 40;
@@ -20,26 +25,150 @@ pub enum Screen {
     Unknown,
 }
 
-/// Reads the bottom of a pane's text.
-pub fn classify(text: &str) -> Screen {
-    let mut lines: Vec<&str> = text.lines().map(str::trim_end).collect();
-    while lines.last().is_some_and(|l| l.is_empty()) {
+/// What the bottom of a pane shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reading {
+    pub screen: Screen,
+    /// The text in the input box that nobody sent, if the screen is the prompt and the box
+    /// isn't empty. Faint text, such as the placeholder, doesn't count.
+    pub input: Option<String>,
+}
+
+/// Reads the bottom of a pane's text: Rex's `vt` format, or plain text.
+pub fn read(screen: &str) -> Reading {
+    let mut lines = styled_lines(screen);
+    while lines.last().is_some_and(|l| l.plain.is_empty()) {
         lines.pop();
     }
     let bottom = &lines[lines.len().saturating_sub(BOTTOM)..];
     let prompt = (1..bottom.len())
         .rev()
-        .find(|&i| is_rule(bottom[i - 1]) && is_prompt_line(bottom[i]));
+        .find(|&i| is_rule(&bottom[i - 1].plain) && is_prompt_line(&bottom[i].plain));
     if let Some(at) = prompt
-        && !bottom[at + 1..].iter().any(|l| is_menu_line(l))
+        && !bottom[at + 1..].iter().any(|l| is_menu_line(&l.plain))
     {
-        return Screen::Prompt;
+        return Reading {
+            screen: Screen::Prompt,
+            input: input(&bottom[at..]),
+        };
     }
-    if bottom.iter().any(|l| is_menu_line(l)) {
+    let screen = if bottom.iter().any(|l| is_menu_line(&l.plain)) {
         Screen::Menu
     } else {
         Screen::Unknown
+    };
+    Reading {
+        screen,
+        input: None,
     }
+}
+
+/// What the bottom of a pane's text shows.
+pub fn classify(text: &str) -> Screen {
+    read(text).screen
+}
+
+/// The typed text from the prompt line down to the box's bottom edge.
+fn input(lines: &[Line]) -> Option<String> {
+    let first = after_marker(&lines[0].typed).unwrap_or_default();
+    let rest = lines[1..]
+        .iter()
+        .take_while(|l| !is_rule(&l.plain) && !is_edge(&l.plain))
+        .map(|l| unboxed(&l.typed));
+    let text: Vec<&str> = std::iter::once(first.trim())
+        .chain(rest)
+        .filter(|l| !l.is_empty())
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
+}
+
+/// One line of the screen, as shown and with faint text blanked out.
+#[derive(Debug, Default)]
+struct Line {
+    plain: String,
+    typed: String,
+}
+
+/// Splits a screen into lines, following the SGR state for faint text. Other escape sequences
+/// are dropped, except cursor-forward, which stands for spaces.
+fn styled_lines(screen: &str) -> Vec<Line> {
+    let mut lines = vec![Line::default()];
+    let mut faint = false;
+    let mut chars = screen.chars().peekable();
+    while let Some(c) = chars.next() {
+        let line = lines.last_mut().expect("starts with a line");
+        match c {
+            '\n' => {
+                line.plain.truncate(line.plain.trim_end().len());
+                lines.push(Line::default());
+            }
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    let mut params = String::new();
+                    let mut last = None;
+                    for p in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&p) {
+                            last = Some(p);
+                            break;
+                        }
+                        params.push(p);
+                    }
+                    match last {
+                        Some('m') => faint = sgr_faint(&params, faint),
+                        Some('C') => {
+                            let n = params.parse().unwrap_or(1).max(1);
+                            line.plain.extend(std::iter::repeat_n(' ', n));
+                            line.typed.extend(std::iter::repeat_n(' ', n));
+                        }
+                        _ => {}
+                    }
+                }
+                Some(']') => {
+                    // An OSC string, such as a hyperlink, ends with BEL or ESC \.
+                    while let Some(p) = chars.next() {
+                        if p == '\x07' || (p == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                Some('(' | ')') => {
+                    chars.next();
+                }
+                _ => {}
+            },
+            c if c.is_control() => {}
+            c => {
+                line.plain.push(c);
+                line.typed.push(if faint { ' ' } else { c });
+            }
+        }
+    }
+    let line = lines.last_mut().expect("starts with a line");
+    line.plain.truncate(line.plain.trim_end().len());
+    lines
+}
+
+/// The faint attribute after an SGR sequence's parameters.
+fn sgr_faint(params: &str, mut faint: bool) -> bool {
+    let params: Vec<&str> = params.split(';').collect();
+    let mut i = 0;
+    while i < params.len() {
+        match params[i] {
+            "" | "0" | "22" => faint = false,
+            "2" => faint = true,
+            // Extended colors carry their own numbers, which aren't attributes.
+            "38" | "48" | "58" => {
+                i += match params.get(i + 1) {
+                    Some(&"5") => 2,
+                    Some(&"2") => 4,
+                    _ => 0,
+                };
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    faint
 }
 
 /// The text inside a box border, if the line has one.
@@ -47,6 +176,15 @@ fn unboxed(line: &str) -> &str {
     let line = line.trim();
     let line = line.strip_prefix('│').unwrap_or(line);
     line.strip_suffix('│').unwrap_or(line).trim()
+}
+
+/// `╰────╯`: the bottom edge of the older boxed prompt.
+fn is_edge(line: &str) -> bool {
+    let inner = line
+        .trim()
+        .trim_start_matches(['╰', '└'])
+        .trim_end_matches(['╯', '┘']);
+    inner.chars().count() >= 3 && inner.chars().all(|c| c == '─')
 }
 
 /// `────` or `╭────╮`.
@@ -163,6 +301,68 @@ mod tests {
         assert_eq!(classify(""), Screen::Unknown);
         // A typed message that begins like a menu option isn't trusted either.
         assert_eq!(classify(&current(&["❯ 1. do this"])), Screen::Menu);
+    }
+
+    /// The bottom of a real Claude Code screen in Rex's vt format, with `input` on the prompt
+    /// line.
+    fn vt(input: &str) -> String {
+        let rule = format!("\x1b[0m\x1b[38;2;136;136;136m{}\x1b[0m", "─".repeat(40));
+        [
+            "\x1b[0m\x1b[38;2;153;153;153m  ⎿ \u{a0}Tip: Use /btw to ask a quick side question\x1b[0m",
+            "\x1b[2C                              ",
+            &rule,
+            &format!("\x1b[0m❯\u{a0}{input}"),
+            &rule,
+            "  \x1b[0m\x1b[38;2;208;135;112mOpus 5.5\x1b[0m\x1b[38;2;153;153;153m \x1b[0m\x1b[38;2;129;161;193m0%\x1b[0m",
+            "  \x1b[0m\x1b[38;2;255;193;7m⏵⏵ auto mode on\x1b[0m\x1b[40;3H",
+        ]
+        .join("\r\n")
+    }
+
+    #[test]
+    fn reads_typed_input_but_not_the_placeholder() {
+        assert_eq!(
+            read(&vt("")),
+            Reading {
+                screen: Screen::Prompt,
+                input: None
+            }
+        );
+        let placeholder = vt("\x1b[0m\x1b[2mTry \"fix lint errors\"\x1b[0m");
+        assert_eq!(read(&placeholder).input, None);
+        assert_eq!(read(&placeholder).screen, Screen::Prompt);
+        let typed = vt("leftover\x1b[1Cwords");
+        assert_eq!(read(&typed).input.as_deref(), Some("leftover words"));
+    }
+
+    #[test]
+    fn reads_multi_line_and_boxed_input() {
+        let screen = current(&["❯ first line", "  second line"]);
+        assert_eq!(
+            read(&screen).input.as_deref(),
+            Some("first line\nsecond line")
+        );
+        let boxed = "╭────────╮\n│ > half │\n│   more │\n╰────────╯\n  ? for shortcuts";
+        assert_eq!(read(boxed).input.as_deref(), Some("half\nmore"));
+        let empty = "╭────────╮\n│ >      │\n╰────────╯\n  ? for shortcuts";
+        assert_eq!(read(empty).input, None);
+    }
+
+    #[test]
+    fn faint_survives_extended_colors() {
+        assert!(sgr_faint("2", false));
+        assert!(!sgr_faint("0", true));
+        assert!(!sgr_faint("22", true));
+        // The 2 in 38;2;r;g;b is a color mode, not faint.
+        assert!(!sgr_faint("38;2;153;153;153", false));
+        assert!(sgr_faint("38;2;1;2;3;2", false));
+        assert!(!sgr_faint("38;5;2", false));
+    }
+
+    #[test]
+    fn hyperlinks_and_charsets_are_skipped() {
+        let lines = styled_lines("a\x1b]8;;https://x\x1b\\link\x1b]8;;\x07b\x1b(Bc");
+        assert_eq!(lines[0].plain, "alinkbc");
     }
 
     #[test]
