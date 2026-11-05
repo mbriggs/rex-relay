@@ -11,6 +11,7 @@ pub mod guard;
 pub mod ids;
 pub mod output;
 pub mod pane;
+pub mod prompt;
 pub mod registry;
 pub mod rex;
 pub mod status;

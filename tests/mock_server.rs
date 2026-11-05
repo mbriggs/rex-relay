@@ -752,6 +752,53 @@ fn send_refuses_pending_prompts_without_answer() {
 }
 
 #[test]
+fn send_refuses_menus_like_the_trust_dialog() {
+    // Claude Code asks whether to trust the folder before its prompt appears. The program has
+    // bracketed paste on and reports no status, so only the screen shows that Enter here would
+    // pick an option.
+    let mock = demo(vec![], AfterEnter::Done);
+    mock.state.lock().unwrap().screen = [
+        "╭──────────────────────────────────────────╮",
+        "│ Do you trust the files in this folder?   │",
+        "│                                          │",
+        "│ /srv/app                                 │",
+        "│                                          │",
+        "│ ❯ 1. Yes, proceed                        │",
+        "│   2. No, exit                            │",
+        "╰──────────────────────────────────────────╯",
+        "   Enter to confirm · Esc to exit",
+    ]
+    .map(String::from)
+    .to_vec();
+    for args in [
+        &["send", "grokbot-demo", "fix the bug"][..],
+        &["send", "grokbot-demo", "1", "--answer"],
+    ] {
+        let output = mock.rexctl(args);
+        assert_eq!(code(&output), 3, "{args:?}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("never picks menu options"),
+            "{output:?}"
+        );
+    }
+    assert!(mock.writes().is_empty());
+    let audit = mock.audit();
+    assert_eq!(audit.len(), 2);
+    assert!(
+        audit
+            .iter()
+            .all(|e| e["result"].as_str().unwrap().starts_with("refused:"))
+    );
+    assert!(audit.iter().all(|e| e["block"] == claude(vec![]).id));
+
+    // A shell prompt isn't Claude Code's either.
+    mock.state.lock().unwrap().screen = vec!["$ ls".into(), "src".into(), "$".into()];
+    let output = mock.rexctl(&["send", "grokbot-demo", "hello"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(mock.writes().is_empty());
+}
+
+#[test]
 fn send_rejects_bad_messages_before_writing() {
     let mock = demo(vec![], AfterEnter::Done);
     for message in ["up\x1b[A", "a\rb", "\x03"] {

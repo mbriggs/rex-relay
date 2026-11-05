@@ -92,7 +92,8 @@ pub struct SendArgs {
     #[arg(long)]
     pub allow_foreign: bool,
     /// The message answers a pending approval or question. Without it, send refuses while
-    /// the program is in Needs approval or Question.
+    /// the program is in Needs approval or Question. A question shown as a numbered menu is
+    /// still refused: send only types at Claude Code's input prompt.
     #[arg(long)]
     pub answer: bool,
     /// Lowers the largest message allowed, in bytes, below the config's `max_message_bytes`

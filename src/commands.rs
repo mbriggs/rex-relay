@@ -15,6 +15,7 @@ use crate::guard::{self, Refusal};
 use crate::ids::{BlockId, SessionId};
 use crate::output::{DEFAULT_HOLDBACK, Pump};
 use crate::pane::{self, Evidence, Pane};
+use crate::prompt;
 use crate::registry::{Owned, Registry};
 use crate::rex::{Rex, Session};
 use crate::status::{self, Records, Status, Tracker};
@@ -527,11 +528,8 @@ impl<'a> SendAttempt<'a> {
             )
             .into());
         }
-        let baseline = if args.wait.quiet {
-            None
-        } else {
-            Some(rex.read_text(&sid, &bid)?)
-        };
+        let screen = rex.read_text(&sid, &bid)?;
+        guard::check_screen(prompt::classify(&screen))?;
 
         rex.write(&sid, &bid, &format!("\x1b[200~{}\x1b[201~", args.message))?;
         std::thread::sleep(ENTER_DELAY);
@@ -554,7 +552,7 @@ impl<'a> SendAttempt<'a> {
                 located.session.label
             ));
         }
-        let pump = baseline.map(|b| Pump::new(&b, DEFAULT_HOLDBACK));
+        let pump = (!args.wait.quiet).then(|| Pump::new(&screen, DEFAULT_HOLDBACK));
         let watch = Watch {
             sid,
             bid,

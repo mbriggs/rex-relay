@@ -3,6 +3,7 @@
 use std::fmt;
 
 use crate::endpoint::{self, Endpoint};
+use crate::prompt::Screen;
 use crate::status::Status;
 
 /// A request a guard rail refused. Exits with [`crate::exit::REFUSED`].
@@ -124,6 +125,20 @@ pub fn check_status_for_send(status: Status, answer: bool) -> Result<(), Refusal
     }
 }
 
+/// `send` types only at Claude Code's input prompt. A menu takes Enter as a choice, so a
+/// message sent to one could pick an option, such as "No, exit" in the folder-trust dialog.
+pub fn check_screen(screen: Screen) -> Result<(), Refusal> {
+    match screen {
+        Screen::Prompt => Ok(()),
+        Screen::Menu => refuse(
+            "the pane shows a menu (such as the folder-trust or a permission dialog), not Claude Code's input prompt; rexctl never picks menu options",
+        ),
+        Screen::Unknown => refuse(
+            "the pane isn't at Claude Code's input prompt; use --block if this is the wrong pane",
+        ),
+    }
+}
+
 pub fn check_endpoint(endpoint: &Endpoint, allowlist: &[String]) -> Result<(), Refusal> {
     if endpoint::is_allowed(endpoint, allowlist) {
         return Ok(());
@@ -209,6 +224,13 @@ mod tests {
         ] {
             check_status_for_send(status, false).unwrap();
         }
+    }
+
+    #[test]
+    fn send_needs_the_input_prompt() {
+        check_screen(Screen::Prompt).unwrap();
+        assert!(check_screen(Screen::Menu).is_err());
+        assert!(check_screen(Screen::Unknown).is_err());
     }
 
     #[test]
