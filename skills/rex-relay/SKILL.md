@@ -12,8 +12,10 @@ the program stopped. Its endpoint and allowlist come from `~/.config/rex-relay/c
 ## Targets
 
 A target is `session`, `session:tab`, or `session:tab:pane`. Each part matches by label, id, or
-the number `rex-relay tree` shows, as in `solar-creek:shell` or `solar-creek:1:2`. Use session ids
-in anything you run twice: Claude Code renames the sessions it runs in, so a label goes stale.
+the number `rex-relay tree` shows, as in `solar-creek:shell` or `solar-creek:1:2`. Claude Code
+renames the sessions it runs in, but a session you created with `new` still answers to its
+original label. The session id is the stable handle, so use it in anything you run twice. A label
+that matches two sessions exits 2 and lists their ids.
 
 ## Commands
 
@@ -56,8 +58,8 @@ and `wait` exits 10 with the dialog's text.
 | Code | Meaning | Next |
 | --- | --- | --- |
 | 0 | Done. `run`: the shell prompt is back. | Check for `DONE:` or `BLOCKED:`. |
-| 1 | Error, such as a target that matches nothing or more than one session. | Read stderr and fix the target. |
-| 2 | Bad arguments. | Check `--help`. |
+| 1 | Error, such as a target that matches nothing. | Read stderr and fix the target. |
+| 2 | Bad arguments, or a label that matches more than one session. | Check `--help`, or use one of the session ids stderr lists. |
 | 3 | A guard rail refused. Nothing was typed. | Read the reason and tell the user. |
 | 10 | Needs approval: Claude Code wants permission for a tool, or shows a dialog such as folder trust. | Tell the user what it asks (`rex-relay status` shows it). They answer in Rex. |
 | 11 | Question: Claude Code asked something. | Same as 10. |

@@ -18,6 +18,11 @@ change the command-line interface.
 
 ### Fixed
 
+- The label given to `new` keeps resolving for `status`, `read`, `wait`, `send`, `run`, `tree`,
+  and `close` after Claude Code renames the session. `list` shows the original label next to the
+  current one. A label that matches more than one session now exits 2 (was 1) and lists the
+  matching ids (#19).
+
 - `new --cwd` expands a leading `~` to the Rex host's home directory, and fails if the
   directory doesn't exist there. Before, Rex started the pane in the home directory without an
   error. `--cwd` must be an absolute path, `~`, or a path under `~/` (#13).

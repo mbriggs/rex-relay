@@ -17,7 +17,7 @@ use crate::output::{DEFAULT_HOLDBACK, Pump};
 use crate::pane::{self, Evidence, Pane, Scope};
 use crate::prompt;
 use crate::registry::{Owned, Registry};
-use crate::rex::{self, Rex, Session, Unreachable};
+use crate::rex::{self, Ambiguous, Rex, Session, Unreachable};
 use crate::status::{self, Records, Status, Tracker};
 
 /// How often `send` and `wait` re-read the status, events or not. This catches a missed
@@ -42,6 +42,8 @@ pub fn run(cli: &Cli) -> i32 {
                 exit::REFUSED
             } else if error.is::<Unreachable>() {
                 exit::LOST_CONNECTION
+            } else if error.is::<Ambiguous>() {
+                exit::USAGE
             } else {
                 exit::ERROR
             };
@@ -124,6 +126,11 @@ impl Ctx {
 
     fn owned(&self, session_id: &SessionId) -> Result<Option<Owned>> {
         self.registry.find(&self.endpoint_key(), session_id)
+    }
+
+    /// Every session rex-relay created on this endpoint.
+    fn all_owned(&self) -> Result<Vec<Owned>> {
+        self.registry.on(&self.endpoint_key())
     }
 }
 
@@ -262,8 +269,14 @@ fn locate(
 }
 
 /// Resolves a command's target to a session and the pane in it that `choose` picks.
-fn find(rex: &mut Rex, target: &Target, attach: bool, choose: Chooser) -> Result<Located> {
-    let (session, scope) = rex.resolve_target(&target.name)?;
+fn find(
+    ctx: &Ctx,
+    rex: &mut Rex,
+    target: &Target,
+    attach: bool,
+    choose: Chooser,
+) -> Result<Located> {
+    let (session, scope) = rex.resolve_target(&target.name, &ctx.all_owned()?)?;
     locate(
         rex,
         session,
@@ -276,12 +289,12 @@ fn find(rex: &mut Rex, target: &Target, attach: bool, choose: Chooser) -> Result
 
 fn tree(ctx: &Ctx, out: &Out, only: Option<&str>) -> Result<i32> {
     let mut rex = ctx.connect()?;
+    let owned = ctx.all_owned()?;
     let sessions = match only {
-        Some(name) => vec![rex.resolve(name)?],
+        Some(name) => vec![rex.resolve(name, &owned)?],
         None => rex.sessions()?,
     };
     rex.observe_all()?;
-    let owned = ctx.registry.on(&ctx.endpoint_key())?;
     for session in &sessions {
         let view = rex.view(&session.id)?;
         let panes: Vec<(Pane, Evidence)> = pane::panes(&view)
@@ -410,6 +423,12 @@ fn list(ctx: &Ctx, out: &Out) -> Result<i32> {
         } else {
             let mark = if mine.is_some() { "*" } else { " " };
             let mut line = format!("{mark} {}\t{}", s.id, s.label);
+            // The label from `new` still resolves, so show it once Claude Code renames the session.
+            if let Some(created) = mine.and_then(|o| o.label.as_deref())
+                && created != s.label
+            {
+                line.push_str(&format!(" (created as {created})"));
+            }
             if let Some(purpose) = mine.and_then(|o| o.purpose.as_deref()) {
                 line.push_str(&format!("\t{purpose}"));
             }
@@ -424,7 +443,7 @@ fn list(ctx: &Ctx, out: &Out) -> Result<i32> {
 
 fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
     let mut rex = ctx.connect()?;
-    let located = find(&mut rex, target, false, pane::choose_claude)?;
+    let located = find(ctx, &mut rex, target, false, pane::choose_claude)?;
     let (sid, bid) = (&located.session.id, &located.pane.block_id);
     let mut status = located.evidence.records.status();
     let reading = match status {
@@ -470,7 +489,7 @@ fn show_status(ctx: &Ctx, out: &Out, target: &Target) -> Result<i32> {
 
 fn read(ctx: &Ctx, out: &Out, target: &Target, count: usize) -> Result<i32> {
     let mut rex = ctx.connect()?;
-    let located = find(&mut rex, target, false, pane::choose_claude)?;
+    let located = find(ctx, &mut rex, target, false, pane::choose_claude)?;
     let text = rex.read_text(&located.session.id, &located.pane.block_id)?;
     rex.close();
     let lines = last_lines(&text, count);
@@ -558,9 +577,11 @@ fn create(
         return Err(Refusal("--cwd must be a plain path".into()).into());
     }
     let mut rex = ctx.connect()?;
-    // A duplicate label would make the label ambiguous for every later command.
+    // A duplicate label would make the label ambiguous for every later command. Owned
+    // sessions keep answering to the label they were created with, so that counts too.
     if let Some(label) = label
-        && rex.sessions()?.iter().any(|s| s.label == label)
+        && let owned = ctx.all_owned()?
+        && rex.sessions()?.iter().any(|s| s.answers_to(label, &owned))
     {
         return Err(Refusal(format!("a session labelled {label:?} already exists")).into());
     }
@@ -625,7 +646,7 @@ enum Closed {
 /// The ownership check happens before any close request is sent.
 fn close_owned(ctx: &Ctx, wanted: &str, entry: &mut Entry) -> Result<Closed> {
     let mut rex = ctx.connect()?;
-    let session = match rex.resolve(wanted) {
+    let session = match rex.resolve(wanted, &ctx.all_owned()?) {
         Ok(session) => session,
         Err(error) => {
             // A registered id the server no longer knows: forget it, close nothing.
@@ -749,7 +770,7 @@ impl<'a> Attempt<'a> {
         let mut rex = ctx.connect()?;
         // The label is resolved now, as Claude Code may have renamed the session; ownership is
         // decided by its id alone, before the session is even attached.
-        let (session, scope) = rex.resolve_target(&args.target.name)?;
+        let (session, scope) = rex.resolve_target(&args.target.name, &ctx.all_owned()?)?;
         self.session = Some(session.clone());
         let owned = ctx.owned(&session.id)?.is_some();
         guard::check_send_owned(
@@ -824,7 +845,7 @@ impl Attempt<'_> {
         let max = args.max_bytes.map_or(limit, |m| m.min(limit));
         guard::check_command(command, max)?;
         let mut rex = ctx.connect()?;
-        let (session, scope) = rex.resolve_target(&args.target.name)?;
+        let (session, scope) = rex.resolve_target(&args.target.name, &ctx.all_owned()?)?;
         self.session = Some(session.clone());
         let owned = ctx.owned(&session.id)?.is_some();
         guard::check_send_owned(
@@ -1026,7 +1047,7 @@ fn clear_input(rex: &mut Rex, sid: &SessionId, bid: &BlockId) -> Result<()> {
 
 fn wait(ctx: &Ctx, out: &Out, args: &WaitArgs) -> Result<i32> {
     let mut rex = ctx.connect()?;
-    let located = find(&mut rex, &args.target, true, pane::choose_claude)?;
+    let located = find(ctx, &mut rex, &args.target, true, pane::choose_claude)?;
     let (sid, bid) = (located.session.id, located.pane.block_id);
     let (seq, records) = rex.program_status(&sid, &bid)?;
     // A startup dialog leaves the records idle, so only the screen tells it from a ready

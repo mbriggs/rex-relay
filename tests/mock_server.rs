@@ -1074,14 +1074,52 @@ fn ambiguous_labels_are_an_error() {
         &["send", "demo", "hi", "--allow-foreign"],
     ] {
         let output = mock.cli(args);
-        assert_eq!(code(&output), 1, "{args:?}: {output:?}");
+        assert_eq!(code(&output), 2, "{args:?}: {output:?}");
+        let err = stderr(&output);
+        assert!(err.contains("more than one session"), "{output:?}");
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("more than one session"),
-            "{output:?}"
+            err.contains(SID) && err.contains(FOREIGN),
+            "lists the ids: {err}"
         );
     }
+    // The label a session was created with counts too, so a foreign session that takes it
+    // makes it ambiguous rather than stealing it.
+    mock.rename(SID, "Renamed by Claude");
+    mock.rename(FOREIGN, "original");
+    let output = mock.cli(&["status", "original"]);
+    assert_eq!(code(&output), 2, "{output:?}");
+    assert!(stderr(&output).contains(FOREIGN), "{output:?}");
     assert!(mock.writes().is_empty());
     assert!(!mock.methods().contains(&"session.destroy".to_owned()));
+}
+
+#[test]
+fn the_label_from_new_resolves_after_a_rename() {
+    let mock = demo(vec![record("done", None, None)], AfterEnter::Done);
+    // `demo` records SID as created with the label "original"; Claude Code then renamed it.
+    mock.rename(SID, "Fix the flaky CI job");
+
+    let output = mock.cli(&["--json", "status", "original"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(json_lines(&output)[0]["session_id"], SID);
+    for args in [
+        &["read", "original", "--lines", "1"][..],
+        &["wait", "original", "--quiet"],
+        &["send", "original", "go", "--quiet"],
+        &["tree", "original"],
+    ] {
+        let output = mock.cli(args);
+        assert_eq!(code(&output), 0, "{args:?}: {output:?}");
+    }
+    assert!(mock.writes().iter().all(|(sid, ..)| sid == SID));
+
+    // `new` refuses the old label, which still names SID.
+    let output = mock.cli(&["new", "original"]);
+    assert_eq!(code(&output), 3, "{output:?}");
+
+    let output = mock.cli(&["close", "original"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert!(mock.owned_ids().is_empty());
 }
 
 #[test]
@@ -1646,7 +1684,7 @@ fn list_status_and_read() {
     let output = mock.cli(&["list"]);
     assert_eq!(
         stdout(&output),
-        format!("* {SID}\tRenamed\tdemo the relay\n  {FOREIGN}\tlookalike\n")
+        format!("* {SID}\tRenamed (created as original)\tdemo the relay\n  {FOREIGN}\tlookalike\n")
     );
     mock.rename(SID, "demo");
 

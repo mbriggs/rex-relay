@@ -119,10 +119,12 @@ URLs with credentials, queries or paths other than `/api/control` are rejected.
 
 Global options: `--endpoint URL`, `--config PATH`, `--json`.
 
-`<session>` is a session id (`session:…`) or a session's *current* label, resolved when the
-command runs. Claude Code renames the sessions it runs in, so the label you created a session with
-may no longer work; the id always does. A label that matches more than one session is an error
-(exit 1); use the id.
+`<session>` is a session id (`session:…`) or a label, resolved when the command runs. A label
+matches a session's current label or, for a session rex-relay created, the label `new` gave it.
+Claude Code renames the sessions it runs in, so the label you created a session with keeps
+working after the rename. The session id is the stable handle: `new` prints it first, and it
+works for any session. A label that matches more than one session is a usage error (exit 2) that
+lists the matching ids; use one of them.
 
 `<target>` is a session, optionally followed by a tab and a pane: `session`, `session:tab`, or
 `session:tab:pane`. For example, `solar-creek:shell` or `solar-creek:1:2`. See
@@ -130,7 +132,7 @@ may no longer work; the id always does. A label that matches more than one sessi
 
 | Command | What it does |
 | --- | --- |
-| `rex-relay list` | Lists sessions. `*` (or `"owned": true`) marks sessions rex-relay created, followed by their purpose. |
+| `rex-relay list` | Lists sessions. `*` (or `"owned": true`) marks sessions rex-relay created, followed by their purpose. A renamed session shows `(created as LABEL)` after its current label. |
 | `rex-relay tree [session]` | Shows each session's tabs and terminal panes: numbers, labels, ids, the program in each pane, and its OSC 7501 status. |
 | `rex-relay status <target> [--block ID]` | Shows the Claude Code pane's status and message. |
 | `rex-relay read <target> [--lines N] [--block ID]` | Prints the pane's last N lines (default 100; 0 for all). |
@@ -313,7 +315,7 @@ and `close` print `session`, `status`, `text`, `created` and `closed` objects.
 | --- | --- |
 | 0 | Done (or the command succeeded). `wait` also returns 0 for an idle pane. |
 | 1 | Error: connection, protocol, session or pane not found, pane closed. |
-| 2 | Usage error. |
+| 2 | Usage error, including a label that matches more than one session. |
 | 3 | Refused by a guard rail. Nothing was typed. |
 | 10 | Needs approval: Claude Code is waiting for a permission decision, or shows a dialog such as folder trust. |
 | 11 | Question: Claude Code asked a question. |
@@ -405,7 +407,7 @@ dedicated config whose `allowed_endpoints` holds only that server.
 - [ ] `rex-relay send "$SID" "Reply with the word pong."` streams the reply and exits 0 (Done). The
       audit log gains `sent` and `done` entries with the hash, not the text.
 - [ ] After Claude Code renames the session, `rex-relay list` still marks it `*`, and `send` by its
-      new label works.
+      new label and by its original label both work.
 - [ ] A multi-line message arrives as one prompt (bracketed paste) and is submitted once.
 - [ ] `rex-relay new` in a directory Claude Code hasn't trusted yet, then an immediate
       `rex-relay send`, exits 3 with "never picks menu options". The trust dialog stays open, and
