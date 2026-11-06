@@ -5,6 +5,8 @@ change the command-line interface.
 
 ## Unreleased
 
+## [0.1.1] - 2026-11-05
+
 ### Added
 
 - A Dialog status for menus Claude Code shows without reporting a status, such as the
