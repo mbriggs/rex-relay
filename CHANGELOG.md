@@ -5,6 +5,14 @@ change the command-line interface.
 
 ## Unreleased
 
+## [0.1.2] - 2026-11-05
+
+### Fixed
+
+- The release workflow builds the Apple binaries on `macos-15` runners. GitHub no longer
+  supports the `macos-14` configuration, so the v0.1.1 macOS release jobs never started and
+  the release wasn't published (#48, #49).
+
 ## [0.1.1] - 2026-11-05
 
 ### Added
